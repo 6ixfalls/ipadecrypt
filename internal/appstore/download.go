@@ -174,7 +174,7 @@ func (c *Client) volumeDownload(acc *Account, app App, externalVersionID string)
 	}
 
 	var out downloadResult
-	if _, err := c.send(http.MethodPost, url, headers, body, formatXML, &out); err != nil {
+	if _, err := c.send(http.MethodPost, url, headers, body, nil, formatXML, &out); err != nil {
 		return downloadItem{}, fmt.Errorf("download: %w", err)
 	}
 

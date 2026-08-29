@@ -63,7 +63,7 @@ func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) err
 
 	var out purchaseResult
 
-	res, err := c.send(http.MethodPost, url, headers, body, formatXML, &out)
+	res, err := c.send(http.MethodPost, url, headers, body, nil, formatXML, &out)
 	if err != nil {
 		return fmt.Errorf("purchase: %w", err)
 	}

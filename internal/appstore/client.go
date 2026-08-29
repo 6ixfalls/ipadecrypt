@@ -10,8 +10,9 @@ import (
 )
 
 type Client struct {
-	jar  *cookiejar.Jar
-	http *http.Client
+	jar                 *cookiejar.Jar
+	http                *http.Client
+	actionSignerFactory ActionSignerFactory
 }
 
 func New(cookiesFile string) (*Client, error) {
@@ -31,7 +32,7 @@ func New(cookiesFile string) (*Client, error) {
 		},
 	}
 
-	return &Client{jar: jar, http: hc}, nil
+	return &Client{jar: jar, http: hc, actionSignerFactory: defaultActionSignerFactory}, nil
 }
 
 // guid returns the Configurator-shaped GUID: uppercase MAC address, no colons.

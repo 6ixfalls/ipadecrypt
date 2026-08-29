@@ -52,11 +52,18 @@ const (
 	downloadPath = "/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct"
 	authURL      = "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate"
 
+	// PrivateAppStoreAPIPathAuth is the exact path Apple accepts for the signed
+	// authenticate endpoint (optionally on a <pod>-buy.itunes.apple.com host).
+	PrivateAppStoreAPIPathAuth = "/WebObjects/MZFinance.woa/wa/authenticate"
+
 	PrivateAuthDomain     = "auth." + iTunesDomain
 	PrivateAuthPathNative = "/auth/v1/native/fast/"
 
-	hdrStoreFront = "X-Set-Apple-Store-Front"
-	hdrPod        = "pod"
+	hdrStoreFront     = "X-Set-Apple-Store-Front"
+	hdrPod            = "pod"
+	headerAppleAction = "X-Apple-ActionSignature"
+
+	supportedSAPVersion = 200
 
 	pricingAppStore    = "STDQ"
 	pricingAppleArcade = "GAME"

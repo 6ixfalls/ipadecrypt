@@ -2,6 +2,7 @@ package appstore
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,7 +29,7 @@ var (
 // send makes an HTTP request, persists cookies, and decodes the response into
 // out (when non-nil) per format. The returned *http.Response has an already-
 // drained body - callers inspect StatusCode/Header only.
-func (c *Client) send(method, url string, headers map[string]string, body []byte, format responseFormat, out any) (*http.Response, error) {
+func (c *Client) send(method, url string, headers map[string]string, body []byte, signer ActionSigner, format responseFormat, out any) (*http.Response, error) {
 	var r io.Reader
 	if len(body) > 0 {
 		r = bytes.NewReader(body)
@@ -41,6 +42,18 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+
+	// The authenticate endpoint requires the request body to be signed with a
+	// virtual machine identity (SAP action signing). When a signer is provided
+	// its signature is attached as the X-Apple-ActionSignature header.
+	if signer != nil {
+		signature, err := signer.Sign(body)
+		if err != nil {
+			return nil, fmt.Errorf("sign Apple action: %w", err)
+		}
+
+		req.Header.Set(headerAppleAction, base64.StdEncoding.EncodeToString(signature))
 	}
 
 	if req.Header.Get("User-Agent") == "" {

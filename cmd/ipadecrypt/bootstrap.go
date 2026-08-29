@@ -37,87 +37,92 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	// ---- Step 1: App Store sign-in -----------------------------------
 
-	tui.Step(1, 4, "Sign in to the App Store")
-	tui.Info("ipadecrypt requires an Apple ID to download .ipas.\nIt has to the be same Apple ID used on the jailbroken device.\nCredentials are stored locally on this machine.")
+	if bootstrapSkipLogin {
+		tui.Step(1, 4, "Sign in to the App Store (skipped)")
+		tui.Info("skipped - App Store download features are disabled.\nYou can still decrypt a local .ipa or an app already installed on the device.")
+	} else {
+		tui.Step(1, 4, "Sign in to the App Store")
+		tui.Info("ipadecrypt requires an Apple ID to download .ipas.\nIt has to the be same Apple ID used on the jailbroken device.\nCredentials are stored locally on this machine.")
 
-	email := cfg.Apple.Email
-	password := cfg.Apple.Password
+		email := cfg.Apple.Email
+		password := cfg.Apple.Password
 
-	if email == "" {
-		s, err := tui.Prompt("Apple ID email")
-		if err != nil {
-			return
-		}
-
-		email = strings.TrimSpace(s)
-	}
-
-	if password == "" {
-		s, err := tui.PromptPassword("Apple ID password")
-		if err != nil {
-			return
-		}
-
-		password = s
-	}
-
-	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
-	if err != nil {
-		tui.Err("appstore client: %v", err)
-		return
-	}
-
-	var (
-		account  *appstore.Account
-		authCode string
-	)
-	for attempt := 0; attempt < 3 && account == nil; attempt++ {
-		live := tui.NewLive()
-		live.Spin("authenticating")
-
-		account, err = as.Login(email, password, authCode)
-		switch {
-		case errors.Is(err, appstore.ErrAuthCodeRequired):
-			live.Stop()
-
-			code, err := tui.Prompt("Apple sent a 6-digit code - enter it")
+		if email == "" {
+			s, err := tui.Prompt("Apple ID email")
 			if err != nil {
 				return
 			}
 
-			authCode = strings.TrimSpace(code)
-
-		case err != nil:
-			live.Fail("login failed: %v", err)
-			return
-
-		default:
-			live.OK("authenticated")
+			email = strings.TrimSpace(s)
 		}
-	}
 
-	if account == nil {
-		tui.Err("login: 3 two-factor attempts failed")
-		return
-	}
+		if password == "" {
+			s, err := tui.PromptPassword("Apple ID password")
+			if err != nil {
+				return
+			}
 
-	cfg.Apple.SetAccount(account)
+			password = s
+		}
 
-	appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
-	if err != nil {
-		tui.Err("resolve appstore country code: %v", err)
-		return
-	}
+		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+		if err != nil {
+			tui.Err("appstore client: %v", err)
+			return
+		}
 
-	tui.Fields(
-		"Apple ID", redact(account.Email),
-		"Name", account.Name,
-		"Storefront", fmt.Sprintf("%s (%s)", redact(account.StoreFront), redact(appStoreCountry)),
-	)
+		var (
+			account  *appstore.Account
+			authCode string
+		)
+		for attempt := 0; attempt < 3 && account == nil; attempt++ {
+			live := tui.NewLive()
+			live.Spin("authenticating")
 
-	if err := cfg.Save(); err != nil {
-		tui.Err("save config: %v", err)
-		return
+			account, err = as.Login(email, password, authCode)
+			switch {
+			case errors.Is(err, appstore.ErrAuthCodeRequired):
+				live.Stop()
+
+				code, err := tui.Prompt("Apple sent a 6-digit code - enter it")
+				if err != nil {
+					return
+				}
+
+				authCode = strings.TrimSpace(code)
+
+			case err != nil:
+				live.Fail("login failed: %v", err)
+				return
+
+			default:
+				live.OK("authenticated")
+			}
+		}
+
+		if account == nil {
+			tui.Err("login: 3 two-factor attempts failed")
+			return
+		}
+
+		cfg.Apple.SetAccount(account)
+
+		appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
+		if err != nil {
+			tui.Err("resolve appstore country code: %v", err)
+			return
+		}
+
+		tui.Fields(
+			"Apple ID", redact(account.Email),
+			"Name", account.Name,
+			"Storefront", fmt.Sprintf("%s (%s)", redact(account.StoreFront), redact(appStoreCountry)),
+		)
+
+		if err := cfg.Save(); err != nil {
+			tui.Err("save config: %v", err)
+			return
+		}
 	}
 
 	// ---- Step 2: connect to device -----------------------------------

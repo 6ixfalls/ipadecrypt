@@ -211,7 +211,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if cfg.Apple.Email == "" || cfg.Device.Host == "" {
+	if cfg.Device.Host == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
 
@@ -377,6 +377,16 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 		tui.OK("%s v%s", appBundleID, appVersion)
 	} else {
+		// The App Store download path is the only branch that needs an Apple ID.
+		// Local .ipa and installed-app decryption work without it, so a config
+		// that skipped login (--skip-login) still runs those.
+		if cfg.Apple.Email == "" {
+			tui.Err("this app must be downloaded from the App Store, but no Apple ID is configured")
+			tui.Info("run `ipadecrypt bootstrap` (without --skip-login) to sign in, or decrypt a local .ipa or an installed app instead")
+
+			return
+		}
+
 		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
 		if err != nil {
 			tui.Err("appstore client: %v", err)

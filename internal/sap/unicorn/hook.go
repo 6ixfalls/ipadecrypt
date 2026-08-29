@@ -96,8 +96,8 @@ func (h *Hook) Close() error {
 	}
 
 	engine := h.engine
-	handle, done, err := engine.beginOperation()
 
+	handle, done, err := engine.beginOperation()
 	if err == nil {
 		err = engine.err(engine.api.hookDel(handle, h.handle))
 

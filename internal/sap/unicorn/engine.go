@@ -215,6 +215,7 @@ func (e *Engine) RegRead(register int) (uint64, error) {
 	defer done()
 
 	var value uint64
+
 	err = e.err(e.api.regRead(handle, int32(register), unsafe.Pointer(&value)))
 
 	return value, err

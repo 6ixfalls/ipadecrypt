@@ -14,6 +14,7 @@ func openLibrary(ctx context.Context) (library, error) {
 	if err != nil {
 		return library{}, err
 	}
+
 	if err := ctx.Err(); err != nil {
 		return library{}, err
 	}
@@ -24,8 +25,10 @@ func openLibrary(ctx context.Context) (library, error) {
 		if err != nil {
 			return library{}, errors.Join(fmt.Errorf("%s: %w", dependency, err), unloadLibraries(handles))
 		}
+
 		handles = append(handles, handle)
 	}
+
 	if err := ctx.Err(); err != nil {
 		return library{}, errors.Join(err, unloadLibraries(handles))
 	}
@@ -34,6 +37,7 @@ func openLibrary(ctx context.Context) (library, error) {
 	if err != nil {
 		return library{}, errors.Join(fmt.Errorf("%s: %w", paths.library, err), unloadLibraries(handles))
 	}
+
 	handles = append(handles, handle)
 	if err := prepareLibrary(handle); err != nil {
 		return library{}, errors.Join(fmt.Errorf("prepare %s: %w", paths.library, err), unloadLibraries(handles))
@@ -50,5 +54,6 @@ func unloadLibraries(handles []syscall.Handle) error {
 	for index := len(handles) - 1; index >= 0; index-- {
 		err = errors.Join(err, syscall.FreeLibrary(handles[index]))
 	}
+
 	return err
 }

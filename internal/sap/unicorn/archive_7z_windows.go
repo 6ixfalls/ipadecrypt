@@ -36,6 +36,7 @@ func openSevenZipEntry(path, name string) (archiveEntry, error) {
 		if candidate.Name != name {
 			continue
 		}
+
 		if candidate.FileInfo().IsDir() {
 			_ = archive.Close()
 			return archiveEntry{}, fmt.Errorf("invalid Unicorn library entry %q", name)
@@ -46,6 +47,7 @@ func openSevenZipEntry(path, name string) (archiveEntry, error) {
 			_ = archive.Close()
 			return archiveEntry{}, fmt.Errorf("open Unicorn library entry: %w", err)
 		}
+
 		return archiveEntry{
 			reader: reader,
 			size:   candidate.UncompressedSize,
@@ -56,7 +58,8 @@ func openSevenZipEntry(path, name string) (archiveEntry, error) {
 	}
 
 	_ = archive.Close()
-	return archiveEntry{}, fmt.Errorf("Unicorn archive does not contain %q", name)
+
+	return archiveEntry{}, fmt.Errorf("unicorn archive does not contain %q", name)
 }
 
 func openTarZstdEntry(path, name string) (archiveEntry, error) {

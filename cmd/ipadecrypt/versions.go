@@ -14,6 +14,7 @@ import (
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/londek/ipadecrypt/internal/updater"
+	lib "github.com/londek/ipadecrypt/pkg/ipadecrypt"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -26,16 +27,20 @@ type versionsTarget struct {
 }
 
 func parseVersionsArg(raw string) (versionsTarget, error) {
-	dt, err := parseDecryptArg(raw)
+	target, err := lib.ParseTarget(raw)
 	if err != nil {
 		return versionsTarget{}, err
 	}
 
-	if dt.localPath != "" {
+	if target.Kind == lib.TargetLocalIPA {
 		return versionsTarget{}, errors.New("versions: local IPA paths are not supported - pass a bundle-id, app-store-id, or app-store-url")
 	}
 
-	return versionsTarget{bundleId: dt.bundleId, appId: dt.appId}, nil
+	if target.Kind == lib.TargetAppID {
+		return versionsTarget{appId: target.Value}, nil
+	}
+
+	return versionsTarget{bundleId: target.Value}, nil
 }
 
 func versionsHandler(cmd *cobra.Command, args []string) {

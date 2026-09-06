@@ -26,9 +26,10 @@ const RemoteRoot = "/var/mobile/Media/ipadecrypt"
 var ErrSudoPasswordRejected = errors.New("sudo password rejected")
 
 type Client struct {
-	cfg  config.Device
-	ssh  *ssh.Client
-	sftp *sftp.Client
+	cfg       config.Device
+	ssh       *ssh.Client
+	sftp      *sftp.Client
+	closeOnce sync.Once
 }
 
 var knownHostsMu sync.Mutex
@@ -123,8 +124,10 @@ func expandUser(path string) (string, error) {
 }
 
 func (c *Client) Close() {
-	c.sftp.Close()
-	c.ssh.Close()
+	c.closeOnce.Do(func() {
+		c.sftp.Close()
+		c.ssh.Close()
+	})
 }
 
 // newHostKeyCallback verifies known hosts and optionally performs strict TOFU:

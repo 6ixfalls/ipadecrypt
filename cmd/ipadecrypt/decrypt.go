@@ -2,195 +2,22 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"net/url"
-	"os"
 	"os/signal"
-	"path"
-	"path/filepath"
-	"regexp"
-	"strings"
-	"sync"
-	"sync/atomic"
 	"syscall"
 
-	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
-	"github.com/londek/ipadecrypt/internal/device"
-	"github.com/londek/ipadecrypt/internal/pipeline"
 	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/londek/ipadecrypt/internal/updater"
+	lib "github.com/londek/ipadecrypt/pkg/ipadecrypt"
 	"github.com/spf13/cobra"
 )
-
-var (
-	appStoreIdRegex = regexp.MustCompile(`/id(\d+)`)
-
-	errAppinstNotFound = errors.New("appinst not found")
-)
-
-type decryptTarget struct {
-	localPath string
-	bundleId  string
-	appId     string
-}
-
-type patchResult struct {
-	uploadPath           string
-	patchedPath          string
-	changed              bool
-	previousMinOS        string
-	watchStripped        int
-	deviceFamilyExpanded bool
-	previousDeviceFamily []int
-	newDeviceFamily      []int
-}
-
-type installPlan struct {
-	helperPath    string
-	appinstPath   string
-	bundleID      string
-	bundlePath    string
-	stagingRemote string
-}
-
-type installResult struct {
-	bundlePath      string
-	installed       bool
-	reinstalled     bool
-	previousVersion string
-}
-
-type sourceDisposition byte
-
-const (
-	sourceDispositionCached sourceDisposition = iota + 1
-	sourceDispositionDownloaded
-)
-
-type installEvent int
-
-const (
-	installHashIPA installEvent = iota + 1
-	installHashInstalled
-	installReadInstalledVersion
-	installReplaceInstalled
-	installUpload
-	installRunAppinst
-	installRescan
-)
-
-type helperUpdate struct {
-	spin         string
-	note         string
-	progress     bool
-	progressCur  int64
-	progressMax  int64
-	progressText string
-}
-
-type helperProgress struct {
-	dumpedTotal      atomic.Int64
-	dumpedMain       atomic.Int64
-	dumpedFrameworks atomic.Int64
-	dumpedOther      atomic.Int64
-}
-
-func parseDecryptArg(raw string) (decryptTarget, error) {
-	// App Store URL
-	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
-		u, err := url.Parse(raw)
-		if err != nil {
-			return decryptTarget{}, fmt.Errorf("parse url: %w", err)
-		}
-
-		m := appStoreIdRegex.FindStringSubmatch(u.Path)
-		if m == nil {
-			return decryptTarget{}, fmt.Errorf("no /id<digits> in url %s", raw)
-		}
-
-		return decryptTarget{appId: m[1]}, nil
-	}
-
-	// Local .ipa path
-	if strings.HasSuffix(strings.ToLower(raw), ".ipa") {
-		info, err := os.Stat(raw)
-		if err != nil {
-			return decryptTarget{}, fmt.Errorf("local IPA %s: %w", raw, err)
-		}
-
-		if info.IsDir() {
-			return decryptTarget{}, fmt.Errorf("local IPA %s is a directory", raw)
-		}
-
-		abs, err := filepath.Abs(raw)
-		if err != nil {
-			return decryptTarget{}, err
-		}
-
-		return decryptTarget{localPath: abs}, nil
-	}
-
-	// Bare numeric string: App Store track ID (e.g. "544007664").
-	if isAllDigits(raw) {
-		return decryptTarget{appId: raw}, nil
-	}
-
-	// Fallback: treat as a bundle identifier.
-	return decryptTarget{bundleId: raw}, nil
-}
-
-func isAllDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-
-	return true
-}
-
-func transferProgressText(label string, cur, total int64) string {
-	if total <= 0 {
-		return label
-	}
-
-	return fmt.Sprintf("%s (%s / %s)", label, humanBytes(cur), humanBytes(total))
-}
-
-func humanBytes(n int64) string {
-	const (
-		KB = 1024
-		MB = KB * 1024
-		GB = MB * 1024
-		TB = GB * 1024
-	)
-	switch {
-	case n >= TB:
-		return fmt.Sprintf("%.2f TB", float64(n)/float64(TB))
-	case n >= GB:
-		return fmt.Sprintf("%.2f GB", float64(n)/float64(GB))
-	case n >= MB:
-		return fmt.Sprintf("%.1f MB", float64(n)/float64(MB))
-	case n >= KB:
-		return fmt.Sprintf("%.1f KB", float64(n)/float64(KB))
-	default:
-		return fmt.Sprintf("%d B", n)
-	}
-}
 
 func decryptHandler(cmd *cobra.Command, args []string) {
 	if decryptFromAppStore && decryptUseInstalled {
 		tui.Err("--from-appstore and --use-installed are mutually exclusive; pass at most one.")
 		return
 	}
-
 	if decryptForceUninstall && decryptNoUninstall {
 		tui.Err("--force-uninstall and --no-uninstall are mutually exclusive; pass at most one.")
 		return
@@ -201,969 +28,118 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		tui.Err("%v", err)
 		return
 	}
+	if cfg.Device.Host == "" {
+		tui.Err("environment not configured")
+		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
+		return
+	}
 
 	upd := updater.Start(context.Background(), Version, cfg)
 	defer upd.Wait()
 
-	target, err := parseDecryptArg(args[0])
-	if err != nil {
-		tui.Err("%v", err)
-		return
+	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	source := lib.SourceAuto
+	if decryptFromAppStore {
+		source = lib.SourceAppStore
+	} else if decryptUseInstalled {
+		source = lib.SourceInstalled
+	}
+	uninstall := lib.UninstallAuto
+	if decryptForceUninstall {
+		uninstall = lib.UninstallAlways
+	} else if decryptNoUninstall {
+		uninstall = lib.UninstallNever
 	}
 
-	if cfg.Device.Host == "" {
-		tui.Err("environment not configured")
-		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
-
-		return
-	}
-
-	//
-	// Connect to device and probe environment
-	//
-
+	account := publicAppleAccount(cfg.Apple)
 	live := tui.NewLive()
-	live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)
+	lastPhase := lib.Phase("")
 
-	dev, err := device.Connect(context.Background(), cfg.Device)
-	if err != nil {
-		live.Fail("ssh connect failed: %v", err)
-		return
-	}
-
-	cleanups := &cleanupStack{}
-	defer cleanups.run()
-
-	// dev.Close pushed first so it runs LAST: remote rm/uninstall need a
-	// live SSH session.
-	cleanups.push(dev.Close)
-
-	sigCh := make(chan os.Signal, 1)
-
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	go func() {
-		sig, ok := <-sigCh
-		if !ok {
-			return
-		}
-
-		// Second Ctrl-C should hard-kill in case cleanup hangs.
-		signal.Reset(syscall.SIGINT, syscall.SIGTERM)
-		tui.Warn("interrupted (%v), cleaning up (press again to force quit)", sig)
-		cleanups.run()
-		os.Exit(130)
-	}()
-
-	var (
-		uninstall           bool
-		uninstallBundleID   string
-		uninstallBundlePath string
-	)
-
-	cleanups.push(func() {
-		if !uninstall || uninstallBundlePath == "" {
-			return
-		}
-
-		if err := dev.Uninstall(uninstallBundlePath); err != nil {
-			tui.Err("uninstall %s: %v", uninstallBundleID, err)
-			return
-		}
-
-		tui.OK("uninstalled %s", uninstallBundleID)
-	})
-
-	live.Spin("probing device")
-
-	probe, err := dev.Probe()
-	if err != nil {
-		live.Fail("probe failed: %v", err)
-		return
-	}
-
-	live.OK("ipadecrypt %s · %s@%s iOS %s %s %s (%s)", Version, cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch, probe.Model, probe.Jailbreak)
-
-	if target.bundleId != "" && !decryptFromAppStore {
-		live = tui.NewLive()
-		live.Spin("checking if %s is installed", target.bundleId)
-
-		installedPath, canonicalID, err := dev.FindInstalledByBundleID(target.bundleId)
-		if err != nil {
-			live.Fail("scan failed: %v", err)
-			return
-		}
-
-		if installedPath != "" {
-			target.bundleId = canonicalID
-
-			version, err := dev.InstalledVersion(installedPath)
-			if err != nil || version == "" {
-				version = "unknown"
-			}
-
-			live.OK("found installed %s v%s", target.bundleId, version)
-
-			useInstalled := decryptUseInstalled
-			if !useInstalled {
-				if !tui.IsTTY() {
-					tui.Err("%s v%s is already installed on the device.", target.bundleId, version)
-					tui.Info("pass --use-installed to decrypt the installed build, --from-appstore to fetch fresh and reinstall, or run in a TTY.")
-
-					return
-				}
-
-				idx, err := tui.Select(
-					fmt.Sprintf("%s v%s is already installed - which build do you want decrypted?", target.bundleId, version),
-					[]string{
-						fmt.Sprintf("Installed on device v%s", version),
-						"Latest from App Store (will reinstall)",
-					},
-				)
-				if err != nil {
-					tui.Err("%v", err)
-					return
-				}
-
-				useInstalled = idx == 0
-			}
-
-			if useInstalled {
+	result, err := lib.Decrypt(ctx, lib.Request{
+		Target: args[0],
+		Device: lib.DeviceConfig{
+			Host: cfg.Device.Host, Port: cfg.Device.Port, User: cfg.Device.User,
+			KnownHostsPath:   cfg.Device.KnownHostsPath,
+			AcceptNewHostKey: cfg.Device.AcceptNewHostKey,
+			Auth: lib.DeviceAuth{Kind: cfg.Device.Auth.Kind, Password: cfg.Device.Auth.Password,
+				KeyPath: cfg.Device.Auth.KeyPath, KeyPassphrase: cfg.Device.Auth.KeyPassphrase},
+		},
+		Apple: &account, StateDir: paths.Root, OutputPath: decryptOutput,
+		ExternalVersionID: decryptExtVerID, Storefront: decryptStorefront,
+		Source: source, Uninstall: uninstall, PatchDeviceType: decryptPatchDevType,
+		SkipAppex: decryptSkipAppex, KeepRemoteFiles: decryptNoCleanup,
+		SkipVerify: decryptNoVerify, ExtraVerify: decryptExtraVerify, Verbose: decryptVerbose,
+		OnEvent: func(event lib.Event) {
+			if event.Phase != lastPhase {
+				lastPhase = event.Phase
 				live = tui.NewLive()
-				live.Spin("preparing helper")
-
-				helperPath, err := dev.EnsureHelper()
-				if err != nil {
-					live.Fail("helper upload: %v", err)
-					return
-				}
-
-				live.OK("helper ready")
-
-				uninstall = decideUninstall(false, decryptForceUninstall, decryptNoUninstall)
-				uninstallBundleID = target.bundleId
-				uninstallBundlePath = installedPath
-
-				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "")
-
-				return
 			}
-		} else {
-			live.OK("%s not installed; will fetch from App Store", target.bundleId)
-		}
+			if event.Message != "" {
+				live.Spin("%s", event.Message)
+			}
+			if event.Total > 0 {
+				live.Progress(event.Current, event.Total)
+			}
+		},
+		SelectInstalled: func(_ context.Context, installed lib.InstalledApp) (bool, error) {
+			if !tui.IsTTY() {
+				return false, fmt.Errorf("%s v%s is already installed; pass --use-installed or --from-appstore", installed.BundleID, installed.Version)
+			}
+			choice, err := tui.Select(
+				fmt.Sprintf("%s v%s is already installed - which build do you want decrypted?", installed.BundleID, installed.Version),
+				[]string{fmt.Sprintf("Installed on device v%s", installed.Version), "Latest from App Store (will reinstall)"},
+			)
+			return choice == 0, err
+		},
+		OnAuthCode: func(_ context.Context) (string, error) {
+			return tui.Prompt("Apple sent a 6-digit code - enter it")
+		},
+		OnAccountUpdate: func(_ context.Context, updated lib.AppleAccount) error {
+			cfg.Apple = internalAppleAccount(updated)
+			return cfg.Save()
+		},
+	})
+	if err != nil {
+		live.Fail("decrypt failed: %v", err)
+		return
 	}
 
-	//
-	// Acquire encrypted IPA, either from the App Store or a local path
-	//
+	live.OK("decrypted %s v%s (%s → %s)", result.BundleID, result.Version,
+		humanBytes(result.BytesWritten), result.OutputPath)
+}
 
-	var (
-		appBundleID string
-		appVersion  string
-		encPath     string
+func publicAppleAccount(account config.Apple) lib.AppleAccount {
+	return lib.AppleAccount{
+		Email: account.Email, Password: account.Password, PasswordToken: account.PasswordToken,
+		DirectoryServicesID: account.DirectoryServicesIdentifier,
+		StoreFront:          account.StoreFront, Pod: account.Pod,
+	}
+}
+
+func internalAppleAccount(account lib.AppleAccount) config.Apple {
+	return config.Apple{
+		Email: account.Email, Password: account.Password, PasswordToken: account.PasswordToken,
+		DirectoryServicesIdentifier: account.DirectoryServicesID,
+		StoreFront:                  account.StoreFront, Pod: account.Pod,
+	}
+}
+
+func humanBytes(n int64) string {
+	const (
+		kiB = 1024
+		miB = kiB * 1024
+		giB = miB * 1024
 	)
-
-	if target.localPath != "" {
-		tui.OK("local IPA %s", filepath.Base(target.localPath))
-
-		appBundleID, appVersion, err = pipeline.AppInfo(target.localPath)
-		if err != nil {
-			tui.Err("read IPA: %v", err)
-			return
-		}
-
-		encPath = target.localPath
-
-		tui.OK("%s v%s", appBundleID, appVersion)
-	} else {
-		// The App Store download path is the only branch that needs an Apple ID.
-		// Local .ipa and installed-app decryption work without it, so a config
-		// that skipped login (--skip-login) still runs those.
-		if cfg.Apple.Email == "" {
-			tui.Err("this app must be downloaded from the App Store, but no Apple ID is configured")
-			tui.Info("run `ipadecrypt bootstrap` (without --skip-login) to sign in, or decrypt a local .ipa or an installed app instead")
-
-			return
-		}
-
-		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
-		if err != nil {
-			tui.Err("appstore client: %v", err)
-			return
-		}
-
-		acc, err := accountWithStorefront(cfg, decryptStorefront)
-		if err != nil {
-			tui.Err("storefront: %v", err)
-			return
-		}
-
-		appStoreCountry, err := appstore.CountryCodeFromStoreFront(acc.StoreFront)
-		if err != nil {
-			tui.Err("resolve appstore country code: %v", err)
-			return
-		}
-
-		tui.OK("signed in as %s (%s storefront)", redact(acc.Email), redact(appStoreCountry))
-
-		live = tui.NewLive()
-
-		if target.appId != "" {
-			live.Spin("resolving appId %s", target.appId)
-		} else {
-			live.Spin("resolving bundleId %s", target.bundleId)
-		}
-
-		app, err := lookupTargetApp(as, acc, target)
-		if err != nil {
-			live.Fail("lookup failed (%s): %v", appStoreCountry, err)
-			return
-		}
-
-		live.OK("found %s on App Store", app.BundleID)
-
-		live = tui.NewLive()
-		live.Spin("fetching download metadata")
-
-		disposition, err := fetchRemoteEncryptedSource(cfg, paths, as, app, decryptExtVerID, func(e authEvent) {
-			switch e {
-			case authReauth:
-				live.Spin("re-authenticating")
-			case authLicense:
-				live.Spin("acquiring license")
-			case authRetryingDownload:
-				live.Spin("retrying download")
-			}
-		}, func(cur, total int64) {
-			live.Message("%s", transferProgressText("downloading IPA from App Store", cur, total))
-			live.Progress(cur, total)
-		})
-		if err != nil {
-			if errors.Is(err, errRemoteDownloadFailed) {
-				live.Fail("download failed: %v", errors.Unwrap(err))
-				return
-			}
-
-			if errors.Is(err, appstore.ErrPaidAppNotOwned) {
-				live.Fail("paid app not owned by %s. sign in with the Apple ID that purchased it", redact(acc.Email))
-				return
-			}
-
-			live.Fail("prepare failed: %v", err)
-
-			return
-		}
-
-		appBundleID = app.BundleID
-		appVersion = disposition.version
-		encPath = disposition.path
-
-		if disposition.kind == sourceDispositionCached {
-			live.OK("cached %s", filepath.Base(encPath))
-		} else {
-			live.OK("downloaded %s", filepath.Base(encPath))
-		}
-	}
-
-	//
-	// Patching MinimumOSVersion if needed
-	//
-
-	live = tui.NewLive()
-	live.Spin("patching Info.plist %s", probe.IOSVersion)
-
-	patch, err := patchSourceForDevice(encPath, probe.IOSVersion, probe.DeviceFamily, decryptPatchDevType)
-	if err != nil {
-		var dfErr *pipeline.ErrDeviceFamilyMismatch
-		if errors.As(err, &dfErr) {
-			live.Fail("device family mismatch: app supports %v, device is %d (%s) - pass --patch-device-type to install anyway",
-				dfErr.Supported, dfErr.Device, pipeline.DeviceFamilyName(dfErr.Device))
-
-			return
-		}
-
-		live.Fail("patch Info.plist failed: %v", err)
-
-		return
-	}
-
-	cleanups.push(func() {
-		if patch.patchedPath != "" {
-			os.Remove(patch.patchedPath)
-		}
-	})
-
-	live.OK("patched Info.plist")
-
-	if patch.changed {
-		tui.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
-	}
-
-	if patch.deviceFamilyExpanded {
-		tui.OK("UIDeviceFamily %v → %v", patch.previousDeviceFamily, patch.newDeviceFamily)
-	}
-
-	if patch.watchStripped > 0 {
-		tui.OK("stripped %d Watch/ entries", patch.watchStripped)
-	}
-
-	live = tui.NewLive()
-	live.Spin("preparing install plan")
-
-	plan, err := buildInstallPlan(dev, patch.uploadPath, appBundleID)
-	if err != nil {
-		switch {
-		case errors.Is(err, errAppinstNotFound):
-			live.Fail("appinst not found on device - run `ipadecrypt bootstrap`")
-		default:
-			live.Fail("prepare install: %v", err)
-		}
-
-		return
-	}
-
-	cleanups.push(func() {
-		if plan.stagingRemote != "" && !decryptNoCleanup {
-			dev.Remove(plan.stagingRemote)
-		}
-	})
-
-	if plan.bundlePath == "" {
-		live.Spin("preparing install")
-	} else {
-		live.Spin("checking installed app at %s", plan.bundlePath)
-	}
-
-	install, err := ensureInstalledBundle(dev, plan, patch.uploadPath, func(e installEvent) {
-		switch e {
-		case installHashIPA:
-			live.Spin("computing IPA checksum")
-		case installHashInstalled:
-			live.Spin("computing installed app checksum")
-		case installReadInstalledVersion:
-			live.Spin("reading installed app version")
-		case installReplaceInstalled:
-			live.Spin("installed app differs - replacing it")
-		case installUpload:
-			live.Spin("uploading IPA to device")
-		case installRunAppinst:
-			live.Spin("running appinst")
-		case installRescan:
-			live.Spin("locating installed app")
-		}
-	}, func(cur, total int64) {
-		live.Message("%s", transferProgressText("uploading IPA to device", cur, total))
-		live.Progress(cur, total)
-	})
-	if err != nil {
-		live.Fail("install failed: %v", err)
-		return
-	}
-
-	if install.reinstalled {
-		live.OK("reinstalled (%s => %s) → %s", install.previousVersion, appVersion, install.bundlePath)
-	} else if install.installed {
-		live.OK("installed → %s", install.bundlePath)
-	} else {
-		live.OK("already installed → %s", install.bundlePath)
-	}
-
-	uninstall = decideUninstall(install.installed || install.reinstalled, decryptForceUninstall, decryptNoUninstall)
-	uninstallBundleID = appBundleID
-	uninstallBundlePath = install.bundlePath
-
-	runDecryptOnBundle(dev, cleanups, plan.helperPath, appBundleID, install.bundlePath, appVersion, encPath)
-}
-
-// decideUninstall picks the post-decrypt cleanup behavior. weInstalledIt
-// is true when this run put the bundle on the device (fresh install or
-// reinstall over a different version). force/no come from the flags.
-func decideUninstall(weInstalledIt, force, no bool) bool {
 	switch {
-	case force:
-		return true
-	case no:
-		return false
+	case n >= giB:
+		return fmt.Sprintf("%.2f GB", float64(n)/giB)
+	case n >= miB:
+		return fmt.Sprintf("%.1f MB", float64(n)/miB)
+	case n >= kiB:
+		return fmt.Sprintf("%.1f KB", float64(n)/kiB)
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
-
-	return weInstalledIt
-}
-
-func verifyOKSummary(res pipeline.VerifyResult, compareSource bool) string {
-	var b strings.Builder
-
-	fmt.Fprintf(&b, "%d Mach-O(s) verified", res.Scanned)
-
-	if compareSource {
-		fmt.Fprintf(&b, ", %d source-matched", res.Compared)
-	}
-
-	var extras []string
-	if len(res.Missing) > 0 {
-		extras = append(extras, fmt.Sprintf("%d source-missing", len(res.Missing)))
-	}
-
-	if len(res.Skipped) > 0 {
-		extras = append(extras, fmt.Sprintf("%d skipped", len(res.Skipped)))
-	}
-
-	if len(extras) > 0 {
-		fmt.Fprintf(&b, " (%s)", strings.Join(extras, ", "))
-	}
-
-	return b.String()
-}
-
-func verifyFailureSummary(res pipeline.VerifyResult) string {
-	parts := make([]string, 0, 3)
-
-	if n := len(res.StillEncrypted); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d still encrypted", n))
-	}
-
-	if n := len(res.AllZeroCrypt); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d all-zero crypt", n))
-	}
-
-	if n := len(res.Mismatches); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d source diff", n))
-	}
-
-	return strings.Join(parts, ", ")
-}
-
-// runDecryptOnBundle runs helper → pull → verify → cleanup on an
-// installed bundle. stagingRemote may be "" for the use-installed path.
-// srcIPAPath is the source IPA on the host when one exists (App Store
-// download / cache hit / local --ipa); empty for the use-installed path
-// where the source lives on-device only. Used by --extra-verify.
-func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, bundleID, bundlePath, version, srcIPAPath string) {
-	outLocal, err := localOutputPath(decryptOutput, bundleID, version)
-	if err != nil {
-		tui.Err("output path: %v", err)
-		return
-	}
-
-	if err := os.MkdirAll(filepath.Dir(outLocal), 0o755); err != nil {
-		tui.Err("mkdir local: %v", err)
-		return
-	}
-
-	outFile, err := os.OpenFile(outLocal, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		tui.Err("open local: %v", err)
-		return
-	}
-
-	// Best-effort: drop the partially-written IPA on any error return.
-	// Cleared after we commit on success.
-	abandonLocal := true
-
-	cleanups.push(func() {
-		outFile.Close()
-
-		if abandonLocal {
-			os.Remove(outLocal)
-		}
-	})
-
-	live := tui.NewLive()
-	live.Spin("starting helper")
-
-	progress := &helperProgress{}
-	onEvent := func(ev device.Event) {
-		update := progress.HandleEvent(ev)
-
-		if update.note != "" {
-			live.Note("%s", update.note)
-		}
-
-		if update.spin != "" {
-			live.Spin("%s", update.spin)
-		}
-
-		if update.progress {
-			if update.progressText != "" {
-				live.Message("%s", update.progressText)
-			}
-
-			live.Progress(update.progressCur, update.progressMax)
-		}
-	}
-
-	cw := &countingWriter{w: outFile, onTick: func(n int64) {
-		live.Message("writing IPA → %s", humanBytes(n))
-	}}
-
-	if srcIPAPath != "" {
-		// Host-side assembly: helper streams decrypted Mach-Os on stdout,
-		// host fuses them with the (unpatched) source IPA into outFile.
-		// No zip on device; output uses the original Info.plist as-is.
-		assembleErr := pipeline.Assemble(srcIPAPath, cw, func(write pipeline.SubstituteWriter) error {
-			code, err := dev.RunHelperExecs(helperPath, bundleID, bundlePath, decryptVerbose, decryptSkipAppex, onEvent, func(name string, _ int64, r io.Reader) error {
-				return write(name, r)
-			})
-			if err != nil {
-				return fmt.Errorf("helper run: %w", err)
-			}
-
-			if code != 0 {
-				return fmt.Errorf("helper exit %d", code)
-			}
-
-			return nil
-		})
-		if assembleErr != nil {
-			live.Fail("assemble: %v", assembleErr)
-			return
-		}
-	} else {
-		// Use-installed path: no source IPA on host, helper packages the
-		// IPA on device and streams its bytes straight into outFile.
-		code, err := dev.RunHelper(helperPath, bundleID, bundlePath, decryptVerbose, decryptSkipAppex, onEvent, cw)
-		if err != nil {
-			live.Fail("helper run: %v", err)
-			return
-		}
-
-		if code != 0 {
-			live.Fail("helper exit %d", code)
-			return
-		}
-	}
-
-	if err := outFile.Sync(); err != nil {
-		live.Fail("sync local: %v", err)
-		return
-	}
-
-	live.OK("%s (%s → %s)", progress.Summary(), humanBytes(cw.n), outLocal)
-
-	abandonLocal = false
-
-	if !decryptNoVerify {
-		if decryptExtraVerify && srcIPAPath == "" {
-			tui.Info("extra-verify unavailable when source ipa is not present")
-		}
-
-		compareSource := decryptExtraVerify && srcIPAPath != ""
-
-		src := ""
-		if compareSource {
-			src = srcIPAPath
-		}
-
-		live = tui.NewLive()
-		if compareSource {
-			live.Spin("verifying Mach-Os (cryptid, zero-fill, source byte-compare)")
-		} else {
-			live.Spin("verifying Mach-Os (cryptid, zero-fill)")
-		}
-
-		res, err := pipeline.Verify(outLocal, src, decryptSkipAppex)
-		if err != nil {
-			live.Fail("verify failed: %v", err)
-			return
-		}
-
-		if !res.OK() {
-			live.Fail("verify failed: %s", verifyFailureSummary(res))
-
-			for _, n := range res.StillEncrypted {
-				tui.Info("  %s still encrypted (cryptid != 0)", n)
-			}
-
-			for _, n := range res.AllZeroCrypt {
-				tui.Info("  %s crypt region all zeros", n)
-			}
-
-			for _, m := range res.Mismatches {
-				tui.Info("  %s %s", m.Name, m.Reason)
-			}
-
-			return
-		}
-
-		live.OK("%s", verifyOKSummary(res, compareSource))
-	}
-}
-
-func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
-	if target.appId != "" {
-		return as.LookupByAppID(acc, target.appId)
-	}
-
-	return as.LookupByBundleID(acc, target.bundleId)
-}
-
-var errRemoteDownloadFailed = errors.New("remote download failed")
-
-type remoteSourceDisposition struct {
-	path    string
-	version string
-	kind    sourceDisposition
-}
-
-func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *appstore.Client, app appstore.App, extVerID string, onAuth func(authEvent), onProgress func(cur, total int64)) (remoteSourceDisposition, error) {
-	if extVerID == "" {
-		encPath, err := paths.CachedEncryptedIPA(app.BundleID, app.Version)
-		if err != nil {
-			return remoteSourceDisposition{}, err
-		}
-
-		if fileExists(encPath) {
-			return remoteSourceDisposition{
-				path:    encPath,
-				version: app.Version,
-				kind:    sourceDispositionCached,
-			}, nil
-		}
-	}
-
-	ticket, err := withAuth(cfg, as, app, 3, onAuth, func() (appstore.DownloadTicket, error) {
-		return as.PrepareDownload(cfg.Apple.Account(), app, extVerID)
-	})
-	if err != nil {
-		return remoteSourceDisposition{}, err
-	}
-
-	encPath, err := paths.CachedEncryptedIPA(app.BundleID, ticket.Version())
-	if err != nil {
-		return remoteSourceDisposition{}, err
-	}
-
-	if fileExists(encPath) {
-		return remoteSourceDisposition{
-			path:    encPath,
-			version: ticket.Version(),
-			kind:    sourceDispositionCached,
-		}, nil
-	}
-
-	if _, err := as.CompleteDownload(cfg.Apple.Account(), ticket, encPath, onProgress); err != nil {
-		return remoteSourceDisposition{}, fmt.Errorf("%w: %w", errRemoteDownloadFailed, err)
-	}
-
-	return remoteSourceDisposition{
-		path:    encPath,
-		version: ticket.Version(),
-		kind:    sourceDispositionDownloaded,
-	}, nil
-}
-
-func patchSourceForDevice(encPath, iosVersion string, deviceFamily int, patchDeviceType bool) (patchResult, error) {
-	pattern := strings.TrimSuffix(filepath.Base(encPath), ".ipa") + "-patched-*.ipa"
-
-	f, err := os.CreateTemp("", pattern)
-	if err != nil {
-		return patchResult{}, fmt.Errorf("create temp ipa: %w", err)
-	}
-
-	tmp := f.Name()
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return patchResult{}, fmt.Errorf("close temp ipa: %w", err)
-	}
-
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return patchResult{}, fmt.Errorf("prepare temp ipa: %w", err)
-	}
-
-	res, err := pipeline.PatchForInstall(encPath, tmp, iosVersion, deviceFamily, patchDeviceType)
-	if err != nil {
-		os.Remove(tmp)
-		return patchResult{}, err
-	}
-
-	if !res.MinOSChanged && res.WatchRemoved == 0 && !res.DeviceFamilyExpanded {
-		os.Remove(tmp)
-		return patchResult{uploadPath: encPath}, nil
-	}
-
-	return patchResult{
-		uploadPath:           tmp,
-		patchedPath:          tmp,
-		changed:              res.MinOSChanged,
-		previousMinOS:        res.PreviousMinOS,
-		watchStripped:        res.WatchRemoved,
-		deviceFamilyExpanded: res.DeviceFamilyExpanded,
-		previousDeviceFamily: res.PreviousDeviceFamily,
-		newDeviceFamily:      res.NewDeviceFamily,
-	}, nil
-}
-
-func buildInstallPlan(dev *device.Client, uploadPath, bundleID string) (installPlan, error) {
-	helperPath, err := dev.EnsureHelper()
-	if err != nil {
-		return installPlan{}, fmt.Errorf("helper upload: %w", err)
-	}
-
-	appinstPath, err := dev.LocateAppinst()
-	if err != nil {
-		return installPlan{}, fmt.Errorf("locate appinst: %w", err)
-	}
-
-	if appinstPath == "" {
-		return installPlan{}, errAppinstNotFound
-	}
-
-	bundlePath, _, err := dev.FindInstalledByBundleID(bundleID)
-	if err != nil {
-		return installPlan{}, fmt.Errorf("scan installed: %w", err)
-	}
-
-	return installPlan{
-		helperPath:    helperPath,
-		appinstPath:   appinstPath,
-		bundleID:      bundleID,
-		bundlePath:    bundlePath,
-		stagingRemote: path.Join(device.RemoteRoot, "staging", filepath.Base(uploadPath)),
-	}, nil
-}
-
-func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath string, onEvent func(installEvent), onProgress func(cur, total int64)) (installResult, error) {
-	notify := func(e installEvent) {
-		if onEvent != nil {
-			onEvent(e)
-		}
-	}
-
-	if plan.bundlePath == "" {
-		return installUploadedBundle(dev, plan, uploadPath, false, "", notify, onProgress)
-	}
-
-	if !decryptFromAppStore {
-		notify(installHashIPA)
-
-		execName, wantSum, err := pipeline.MainExecSHA256(uploadPath)
-		if err != nil {
-			return installResult{}, fmt.Errorf("hash ipa: %w", err)
-		}
-
-		remoteExec := path.Join(plan.bundlePath, execName)
-
-		notify(installHashInstalled)
-
-		gotSum, err := dev.HashFile(remoteExec)
-		if err != nil {
-			return installResult{}, fmt.Errorf("hash device: %w", err)
-		}
-
-		if gotSum == wantSum {
-			return installResult{
-				bundlePath: plan.bundlePath,
-			}, nil
-		}
-	}
-
-	notify(installReadInstalledVersion)
-
-	previousVersion, err := dev.InstalledVersion(plan.bundlePath)
-	if err != nil {
-		previousVersion = ""
-	}
-
-	notify(installReplaceInstalled)
-
-	return installUploadedBundle(dev, plan, uploadPath, true, previousVersion, notify, onProgress)
-}
-
-func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath string, reinstalled bool, previousVersion string, notify func(installEvent), onProgress func(cur, total int64)) (installResult, error) {
-	notify(installUpload)
-
-	src, err := os.Open(uploadPath)
-	if err != nil {
-		return installResult{}, fmt.Errorf("open %s: %w", uploadPath, err)
-	}
-
-	defer src.Close()
-
-	st, err := src.Stat()
-	if err != nil {
-		return installResult{}, fmt.Errorf("stat %s: %w", uploadPath, err)
-	}
-
-	pr := newProgressReader(src, st.Size(), onProgress)
-	if err := dev.Upload(pr, plan.stagingRemote, 0); err != nil {
-		return installResult{}, fmt.Errorf("upload: %w", err)
-	}
-
-	notify(installRunAppinst)
-
-	if err := dev.Install(plan.appinstPath, plan.stagingRemote); err != nil {
-		return installResult{}, fmt.Errorf("install: %w", err)
-	}
-
-	notify(installRescan)
-
-	bundlePath, _, err := dev.FindInstalledByBundleID(plan.bundleID)
-	if err != nil {
-		return installResult{}, fmt.Errorf("post-install scan: %w", err)
-	}
-
-	if bundlePath == "" {
-		return installResult{}, errors.New("install reported success but bundle not found")
-	}
-
-	return installResult{
-		bundlePath:      bundlePath,
-		installed:       true,
-		reinstalled:     reinstalled,
-		previousVersion: previousVersion,
-	}, nil
-}
-
-func localOutputPath(override, bundleID, version string) (string, error) {
-	defaultName := fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version)
-
-	if override == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-
-		return filepath.Join(cwd, defaultName), nil
-	}
-
-	abs, err := filepath.Abs(override)
-	if err != nil {
-		return "", err
-	}
-
-	// if override is just a directory (not a full file path), place the default filename inside it
-	info, err := os.Stat(abs)
-	if err == nil && info.IsDir() {
-		return filepath.Join(abs, defaultName), nil
-	}
-
-	return abs, nil
-}
-
-// cleanupStack is a LIFO of best-effort cleanup callbacks. Drained on normal
-// return (via defer) and on SIGINT/SIGTERM. Idempotent: a second run() is a
-// no-op so the deferred run after signal-driven run is harmless.
-type cleanupStack struct {
-	mu  sync.Mutex
-	fns []func()
-}
-
-func (c *cleanupStack) push(fn func()) {
-	c.mu.Lock()
-	c.fns = append(c.fns, fn)
-	c.mu.Unlock()
-}
-
-func (c *cleanupStack) run() {
-	c.mu.Lock()
-	fns := c.fns
-	c.fns = nil
-	c.mu.Unlock()
-
-	for i := len(fns) - 1; i >= 0; i-- {
-		fns[i]()
-	}
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// HandleEvent renders one helper event into a TUI update. The helper
-// embeds a human-readable `msg` attribute on every event, so this
-// function mostly just relays msg as the note, with per-event spinner
-// updates and counters layered on top.
-func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
-	upd := helperUpdate{note: ev.Attr("msg")}
-
-	switch ev.Name {
-	// Spinner-only events: progress indicator, no note line.
-	case "bundle.begin":
-		upd.note = ""
-		upd.spin = fmt.Sprintf("decrypting %s", path.Base(ev.Attr("src")))
-	case "dyld.resuming":
-		upd.note = ""
-		upd.spin = "running target"
-	case "image.begin":
-		upd.note = ""
-		upd.spin = fmt.Sprintf("decrypting %s", ev.Attr("name"))
-	case "pack.begin":
-		upd.note = ""
-
-		ipa := ev.Attr("ipa")
-		if ipa == "-" {
-			upd.spin = "packaging IPA → stdout"
-		} else {
-			upd.spin = fmt.Sprintf("packaging IPA → %s", path.Base(ipa))
-		}
-
-	// Counters + spinner update on each successful dump.
-	case "image.done":
-		p.dumpedTotal.Add(1)
-
-		switch ev.Attr("kind") {
-		case "main":
-			p.dumpedMain.Add(1)
-		case "framework":
-			p.dumpedFrameworks.Add(1)
-		default:
-			p.dumpedOther.Add(1)
-		}
-
-		upd.spin = fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load())
-
-	// Suppress empty-result bundle.done so the TUI stays quiet on appex
-	// passes that produce no extras.
-	case "bundle.done":
-		if ev.Attr("extras") == "0" {
-			upd.note = ""
-		}
-
-	// Trap on the benign dyld halt brk is silent  the helper catches it
-	// on purpose so the address space stays readable; nothing to surface.
-	case "dyld.trapped":
-		if ev.Attr("exception") == "EXC_BREAKPOINT" {
-			upd.note = ""
-		}
-
-	// Pure diagnostics that show up only in --verbose runs.
-	case "target.csflags",
-		"patch.scan_skipped", "patch.skipped", "patch.dyld_base_diff",
-		"dyld.settled", "dyld.fault_skip", "dyld.pac_stripped",
-		"staging.begin", "done":
-		upd.note = ""
-	}
-
-	// Catch-all for unknown event names: fall back to msg attr (already
-	// set above). If a future event lacks msg, render attrs verbatim so
-	// nothing is silently lost.
-	if upd.note == "" && upd.spin == "" && ev.Attr("msg") == "" {
-		parts := []string{"event=" + ev.Name}
-		for k, v := range ev.Attrs {
-			if k == "event" || k == "level" {
-				continue
-			}
-
-			parts = append(parts, fmt.Sprintf("%s=%q", k, v))
-		}
-
-		upd.note = strings.Join(parts, " ")
-	}
-
-	return upd
-}
-
-func (p *helperProgress) Summary() string {
-	total := p.dumpedTotal.Load()
-	main := p.dumpedMain.Load()
-	frameworks := p.dumpedFrameworks.Load()
-	other := p.dumpedOther.Load()
-
-	summary := fmt.Sprintf("decrypted %d image(s): %d main, %d framework", total, main, frameworks)
-	if other > 0 {
-		summary += fmt.Sprintf(", %d other", other)
-	}
-
-	return summary
 }

@@ -50,6 +50,55 @@ cd ipadecrypt
 go build ./cmd/ipadecrypt
 ```
 
+### Go package
+
+Servers and other Go programs can embed the complete workflow through the
+public package. The package accepts credentials in memory, reports structured
+progress, supports cancellation, verifies SSH host keys, and returns a
+structured result:
+
+```go
+import (
+    "context"
+
+    "github.com/londek/ipadecrypt/pkg/ipadecrypt"
+)
+
+result, err := ipadecrypt.Decrypt(ctx, ipadecrypt.Request{
+    Target:   "com.example.app",
+    StateDir: "/var/lib/my-worker/ipadecrypt",
+    Device: ipadecrypt.DeviceConfig{
+        Host:           "decrypt-device.internal",
+        User:           "mobile",
+        KnownHostsPath: "/var/lib/my-worker/known_hosts",
+        Auth: ipadecrypt.DeviceAuth{
+            Kind:     "password",
+            Password: devicePassword,
+        },
+    },
+    Apple: &ipadecrypt.AppleAccount{
+        Email:         appleID,
+        Password:      applePassword,
+        PasswordToken: passwordToken,
+    },
+    OnEvent: func(event ipadecrypt.Event) {
+        jobs.Publish(jobID, event)
+    },
+    OnAuthCode: func(ctx context.Context) (string, error) {
+        return jobs.WaitForAppleAuthCode(ctx, jobID)
+    },
+    OnAccountUpdate: func(ctx context.Context, account ipadecrypt.AppleAccount) error {
+        return secrets.StoreAppleAccount(ctx, account)
+    },
+})
+```
+
+The caller must hold an exclusive lease for the physical device for the full
+call. Queueing, authentication/authorization, rate limits, secret storage,
+output object storage, and job retention remain backend responsibilities.
+`AcceptNewHostKey` enables trust-on-first-use for a new device; changed keys are
+always rejected.
+
 ## Usage
 
 ### First-time setup

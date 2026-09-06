@@ -11,7 +11,7 @@ For regular development you only need the CLI; the prebuilt helper is committed 
 
 ### CLI only (cross-platform)
 
-- Go 1.25+
+- Go 1.26+
 
 ### Helper
 

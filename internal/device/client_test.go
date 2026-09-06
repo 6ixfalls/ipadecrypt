@@ -10,6 +10,7 @@ import (
 
 	"github.com/londek/ipadecrypt/internal/config"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 func TestKnownHostsTOFURejectsChangedKey(t *testing.T) {
@@ -38,6 +39,41 @@ func TestKnownHostsTOFURejectsChangedKey(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestKnownHostsTOFUPreservesUnterminatedLastLine(t *testing.T) {
+	t.Parallel()
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	firstKey := testPublicKey(t)
+	firstHost := "first.example:22"
+	firstLine := knownhosts.Line([]string{knownhosts.Normalize(firstHost)}, firstKey)
+	if err := os.WriteFile(knownHostsPath, []byte(firstLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	callback, err := newHostKeyCallback(config.Device{
+		KnownHostsPath:   knownHostsPath,
+		AcceptNewHostKey: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondKey := testPublicKey(t)
+	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.2"), Port: 22}
+	if err := callback("second.example:22", remote, secondKey); err != nil {
+		t.Fatalf("enroll second key: %v", err)
+	}
+
+	check, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		t.Fatalf("parse updated known_hosts: %v", err)
+	}
+	if err := check(firstHost, remote, firstKey); err != nil {
+		t.Fatalf("verify first key: %v", err)
+	}
+	if err := check("second.example:22", remote, secondKey); err != nil {
+		t.Fatalf("verify second key: %v", err)
 	}
 }
 

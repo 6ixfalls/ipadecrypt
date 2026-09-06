@@ -177,34 +177,68 @@ func newHostKeyCallback(dev config.Device) (ssh.HostKeyCallback, error) {
 		knownHostsMu.Lock()
 		defer knownHostsMu.Unlock()
 
-		freshCheck, err := knownhosts.New(knownHostsPath)
-		if err != nil {
-			return err
-		}
-		freshErr := freshCheck(hostname, remote, key)
-		if freshErr == nil {
-			return nil
-		}
-		var freshKeyErr *knownhosts.KeyError
-		if !errors.As(freshErr, &freshKeyErr) || len(freshKeyErr.Want) != 0 {
-			return freshErr
-		}
+		return withLockedFile(knownHostsPath, func(f *os.File) error {
+			// Re-read after acquiring the process-wide file lock. Another process
+			// may have enrolled this hostname while this connection was starting.
+			freshCheck, err := knownhosts.New(knownHostsPath)
+			if err != nil {
+				return err
+			}
+			freshErr := freshCheck(hostname, remote, key)
+			if freshErr == nil {
+				return nil
+			}
+			var freshKeyErr *knownhosts.KeyError
+			if !errors.As(freshErr, &freshKeyErr) || len(freshKeyErr.Want) != 0 {
+				return freshErr
+			}
 
-		f, err := os.OpenFile(knownHostsPath, os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			return fmt.Errorf("append known host: %w", err)
-		}
-		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key) + "\n"
-		if _, err := io.WriteString(f, line); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("write known host: %w", err)
-		}
-		if err := f.Sync(); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("sync known hosts: %w", err)
-		}
-		return f.Close()
+			size, err := f.Seek(0, io.SeekEnd)
+			if err != nil {
+				return fmt.Errorf("seek known hosts: %w", err)
+			}
+			if size > 0 {
+				var last [1]byte
+				if _, err := f.ReadAt(last[:], size-1); err != nil {
+					return fmt.Errorf("read known hosts terminator: %w", err)
+				}
+				if last[0] != '\n' {
+					if _, err := io.WriteString(f, "\n"); err != nil {
+						return fmt.Errorf("terminate known-hosts line: %w", err)
+					}
+				}
+			}
+
+			line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key) + "\n"
+			if _, err := io.WriteString(f, line); err != nil {
+				return fmt.Errorf("write known host: %w", err)
+			}
+			if err := f.Sync(); err != nil {
+				return fmt.Errorf("sync known hosts: %w", err)
+			}
+			return nil
+		})
 	}, nil
+}
+
+func withLockedFile(path string, fn func(*os.File) error) (retErr error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open known hosts for update: %w", err)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, f.Close())
+	}()
+
+	unlock, err := lockFile(f)
+	if err != nil {
+		return fmt.Errorf("lock known hosts: %w", err)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, unlock())
+	}()
+
+	return fn(f)
 }
 
 // shellQuote wraps s in single quotes for safe interpolation into a POSIX

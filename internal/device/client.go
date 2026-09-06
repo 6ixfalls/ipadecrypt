@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 const RemoteRoot = "/var/mobile/Media/ipadecrypt"
@@ -29,8 +31,15 @@ type Client struct {
 	sftp *sftp.Client
 }
 
+var knownHostsMu sync.Mutex
+
 func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 	auth, err := sshAuthMethods(dev.Auth)
+	if err != nil {
+		return nil, err
+	}
+
+	hostKeyCallback, err := newHostKeyCallback(dev)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +47,7 @@ func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 	cfg := &ssh.ClientConfig{
 		User:            dev.User,
 		Auth:            auth,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         15 * time.Second,
 	}
 
@@ -116,6 +125,83 @@ func expandUser(path string) (string, error) {
 func (c *Client) Close() {
 	c.sftp.Close()
 	c.ssh.Close()
+}
+
+// newHostKeyCallback verifies known hosts and optionally performs strict TOFU:
+// only an unknown host is enrolled; a changed key is always rejected.
+func newHostKeyCallback(dev config.Device) (ssh.HostKeyCallback, error) {
+	if dev.KnownHostsPath == "" {
+		return nil, errors.New("SSH known-hosts path is required")
+	}
+
+	knownHostsPath, err := expandUser(dev.KnownHostsPath)
+	if err != nil {
+		return nil, fmt.Errorf("expand known-hosts path: %w", err)
+	}
+
+	if _, err := os.Stat(knownHostsPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) || !dev.AcceptNewHostKey {
+			return nil, fmt.Errorf("open known hosts %s: %w", knownHostsPath, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(knownHostsPath), 0o700); err != nil {
+			return nil, fmt.Errorf("create known-hosts directory: %w", err)
+		}
+		f, err := os.OpenFile(knownHostsPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("create known hosts %s: %w", knownHostsPath, err)
+		}
+		if err == nil {
+			_ = f.Close()
+		}
+	}
+
+	check, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		return nil, fmt.Errorf("parse known hosts %s: %w", knownHostsPath, err)
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		checkErr := check(hostname, remote, key)
+		if checkErr == nil {
+			return nil
+		}
+
+		var keyErr *knownhosts.KeyError
+		if !dev.AcceptNewHostKey || !errors.As(checkErr, &keyErr) || len(keyErr.Want) != 0 {
+			return checkErr
+		}
+
+		knownHostsMu.Lock()
+		defer knownHostsMu.Unlock()
+
+		freshCheck, err := knownhosts.New(knownHostsPath)
+		if err != nil {
+			return err
+		}
+		freshErr := freshCheck(hostname, remote, key)
+		if freshErr == nil {
+			return nil
+		}
+		var freshKeyErr *knownhosts.KeyError
+		if !errors.As(freshErr, &freshKeyErr) || len(freshKeyErr.Want) != 0 {
+			return freshErr
+		}
+
+		f, err := os.OpenFile(knownHostsPath, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("append known host: %w", err)
+		}
+		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key) + "\n"
+		if _, err := io.WriteString(f, line); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("write known host: %w", err)
+		}
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("sync known hosts: %w", err)
+		}
+		return f.Close()
+	}, nil
 }
 
 // shellQuote wraps s in single quotes for safe interpolation into a POSIX

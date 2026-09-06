@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/spf13/cobra"
@@ -113,10 +114,15 @@ func loadConfigOrDefault(rootDir string) (*config.Config, *config.Paths, error) 
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return config.New(cfgFile), paths, nil
+			cfg = config.New(cfgFile)
+		} else {
+			return nil, nil, fmt.Errorf("load config: %w", err)
 		}
+	}
 
-		return nil, nil, fmt.Errorf("load config: %w", err)
+	if cfg.Device.KnownHostsPath == "" {
+		cfg.Device.KnownHostsPath = filepath.Join(paths.Root, "known_hosts")
+		cfg.Device.AcceptNewHostKey = true
 	}
 
 	return cfg, paths, nil

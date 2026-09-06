@@ -12,6 +12,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.50.0
 	golang.org/x/mod v0.37.0
+	golang.org/x/sys v0.43.0
 	golang.org/x/term v0.42.0
 	howett.net/plist v1.0.1
 	howett.net/ranger v0.0.0-20171016084633-e2e137620847
@@ -34,7 +35,6 @@ require (
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	gopkg.in/errgo.v1 v1.0.1 // indirect
 	gopkg.in/retry.v1 v1.0.3 // indirect

@@ -190,7 +190,7 @@ func (c *Client) LocateAppSync() (string, error) {
 }
 
 func (c *Client) Install(appinstPath, ipaRemote string) error {
-	out, errOut, code, err := c.RunSudo(fmt.Sprintf("%s %q", appinstPath, ipaRemote))
+	out, errOut, code, err := c.RunSudo(shellQuote(appinstPath) + " " + shellQuote(ipaRemote))
 	if err != nil {
 		return fmt.Errorf("appinst: %w", err)
 	}
@@ -264,19 +264,19 @@ func (c *Client) EnsureHelper() (string, error) {
 func (c *Client) HashFile(target string) (string, error) {
 	// procursus (Dopamine + palera1n) ships sha256sum (from coreutils) and
 	// shasum (perl). Try both. Output is `<hex>  <path>`; cut first field.
-	cmd := fmt.Sprintf(
-		"sh -c '"+
-			"for p in sha256sum /var/jb/usr/bin/sha256sum /usr/bin/sha256sum "+
+	quotedTarget := shellQuote(target)
+	script := fmt.Sprintf(
+		"for p in sha256sum /var/jb/usr/bin/sha256sum /usr/bin/sha256sum "+
 			"shasum /var/jb/usr/bin/shasum /usr/bin/shasum; do "+
 			"  if command -v \"$p\" >/dev/null 2>&1; then "+
 			"    case \"$p\" in "+
-			"      *shasum) \"$p\" -a 256 %[1]q | cut -d\" \" -f1; exit 0;; "+
-			"      *) \"$p\" %[1]q | cut -d\" \" -f1; exit 0;; "+
+			"      *shasum) \"$p\" -a 256 %s | cut -d\" \" -f1; exit 0;; "+
+			"      *) \"$p\" %s | cut -d\" \" -f1; exit 0;; "+
 			"    esac; "+
 			"  fi; "+
-			"done; exit 127"+
-			"'",
-		target)
+			"done; exit 127",
+		quotedTarget, quotedTarget)
+	cmd := "sh -c " + shellQuote(script)
 
 	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
@@ -295,7 +295,7 @@ func (c *Client) HashFile(target string) (string, error) {
 func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 	infoPath := path.Join(bundlePath, "Info.plist")
 
-	out, errOut, code, err := c.RunSudo(fmt.Sprintf("cat %q", infoPath))
+	out, errOut, code, err := c.RunSudo("cat " + shellQuote(infoPath))
 	if err != nil {
 		return "", fmt.Errorf("read installed version: %w", err)
 	}
@@ -358,7 +358,7 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, string, error
 }
 
 func (c *Client) bundleIdentifierAt(infoPlistPath string) (string, error) {
-	out, errOut, code, err := c.RunSudo(fmt.Sprintf("cat %q", infoPlistPath))
+	out, errOut, code, err := c.RunSudo("cat " + shellQuote(infoPlistPath))
 	if err != nil {
 		return "", fmt.Errorf("read Info.plist: %w", err)
 	}
@@ -381,7 +381,7 @@ func (c *Client) bundleIdentifierAt(infoPlistPath string) (string, error) {
 // should exit 2 with a usage string we can recognize. Catches common issues
 // (binary not executable, sudo denied, missing codesign).
 func (c *Client) VerifyHelper(helperPath string) error {
-	cmd := fmt.Sprintf("%s 2>&1 | head -1", helperPath)
+	cmd := fmt.Sprintf("%s 2>&1 | head -1", shellQuote(helperPath))
 
 	out, _, _, err := c.RunSudo(cmd)
 	if err != nil {
@@ -425,8 +425,8 @@ func (c *Client) RunHelper(helperPath, bundleID, bundlePath string,
 		subflag = "--skip-appex "
 	}
 
-	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q -",
-		helperPath, gflag, subflag, bundleID, bundlePath)
+	cmd := fmt.Sprintf("%s %sdecrypt %s%s %s -",
+		shellQuote(helperPath), gflag, subflag, shellQuote(bundleID), shellQuote(bundlePath))
 
 	splitter := newEventSplitter(onEvent, io.Discard)
 	defer splitter.Close()
@@ -452,8 +452,8 @@ func (c *Client) RunHelperExecs(helperPath, bundleID, bundlePath string,
 		subflag += "--skip-appex "
 	}
 
-	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q",
-		helperPath, gflag, subflag, bundleID, bundlePath)
+	cmd := fmt.Sprintf("%s %sdecrypt %s%s %s",
+		shellQuote(helperPath), gflag, subflag, shellQuote(bundleID), shellQuote(bundlePath))
 
 	splitter := newEventSplitter(onEvent, io.Discard)
 	defer splitter.Close()

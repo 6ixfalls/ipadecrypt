@@ -473,3 +473,49 @@ func cmpVer(a, b string) int {
 
 	return 0
 }
+
+// InfoSHA256 fingerprints the exact main application metadata in an IPA.
+func InfoSHA256(ipaPath string) (string, error) {
+	r, err := zip.OpenReader(ipaPath)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+
+	found := ""
+
+	for _, f := range r.File {
+		if !isMainAppInfoPlist(f.Name) {
+			continue
+		}
+
+		if found != "" {
+			return "", fmt.Errorf("multiple main application metadata files")
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+
+		h := sha256.New()
+		_, err = io.Copy(h, rc)
+		closeErr := rc.Close()
+
+		if err != nil {
+			return "", err
+		}
+
+		if closeErr != nil {
+			return "", closeErr
+		}
+
+		found = hex.EncodeToString(h.Sum(nil))
+	}
+
+	if found == "" {
+		return "", fmt.Errorf("main application metadata missing")
+	}
+
+	return found, nil
+}

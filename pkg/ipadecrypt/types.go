@@ -111,6 +111,12 @@ type DeviceConfig struct {
 
 // Request describes one complete decryption operation.
 type Request struct {
+	// OperationID and JournalDir enable durable cleanup. IDs are single-use;
+	// JournalDir must be private durable storage outside StateDir/workspaces.
+	OperationID string
+	JournalDir  string
+	operation   *operationJournal
+
 	// Target is a bundle ID, numeric App Store ID, App Store URL, or local IPA.
 	Target string
 	Device DeviceConfig
@@ -223,10 +229,12 @@ func ParseTarget(raw string) (Target, error) {
 		if err != nil {
 			return Target{}, fmt.Errorf("parse URL: %w", err)
 		}
+
 		match := appStoreIDPattern.FindStringSubmatch(u.Path)
 		if match == nil {
 			return Target{}, fmt.Errorf("no /id<digits> in URL %s", raw)
 		}
+
 		return Target{Kind: TargetAppID, Value: match[1]}, nil
 	}
 
@@ -235,24 +243,29 @@ func ParseTarget(raw string) (Target, error) {
 		if err != nil {
 			return Target{}, fmt.Errorf("local IPA %s: %w", raw, err)
 		}
+
 		if info.IsDir() {
 			return Target{}, fmt.Errorf("local IPA %s is a directory", raw)
 		}
+
 		abs, err := filepath.Abs(raw)
 		if err != nil {
 			return Target{}, err
 		}
+
 		return Target{Kind: TargetLocalIPA, Value: abs}, nil
 	}
 
 	if raw != "" {
 		allDigits := true
+
 		for _, r := range raw {
 			if r < '0' || r > '9' {
 				allDigits = false
 				break
 			}
 		}
+
 		if allDigits {
 			return Target{Kind: TargetAppID, Value: raw}, nil
 		}
@@ -261,6 +274,7 @@ func ParseTarget(raw string) (Target, error) {
 	if strings.TrimSpace(raw) == "" {
 		return Target{}, errors.New("target is required")
 	}
+
 	return Target{Kind: TargetBundleID, Value: raw}, nil
 }
 
@@ -284,6 +298,7 @@ func verificationResult(r pipeline.VerifyResult) VerificationResult {
 	for i, mismatch := range r.Mismatches {
 		out.Mismatches[i] = VerificationMismatch{Name: mismatch.Name, Reason: mismatch.Reason}
 	}
+
 	return out
 }
 
@@ -291,6 +306,7 @@ func internalAccount(a *AppleAccount) *appstore.Account {
 	if a == nil {
 		return nil
 	}
+
 	return &appstore.Account{Email: a.Email, Name: a.Name, Password: a.Password, PasswordToken: a.PasswordToken,
 		DirectoryServicesID: a.DirectoryServicesID, StoreFront: a.StoreFront, Pod: a.Pod}
 }
@@ -305,10 +321,12 @@ func internalDevice(d DeviceConfig) config.Device {
 	if port == 0 {
 		port = 22
 	}
+
 	user := d.User
 	if user == "" {
 		user = "mobile"
 	}
+
 	return config.Device{Host: d.Host, Port: port, User: user,
 		KnownHostsPath: d.KnownHostsPath, AcceptNewHostKey: d.AcceptNewHostKey,
 		Auth: config.DeviceAuth{Kind: d.Auth.Kind, Password: d.Auth.Password,

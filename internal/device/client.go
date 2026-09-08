@@ -26,10 +26,12 @@ const RemoteRoot = "/var/mobile/Media/ipadecrypt"
 var ErrSudoPasswordRejected = errors.New("sudo password rejected")
 
 type Client struct {
-	cfg       config.Device
-	ssh       *ssh.Client
-	sftp      *sftp.Client
-	closeOnce sync.Once
+	cfg             config.Device
+	ssh             *ssh.Client
+	sftp            *sftp.Client
+	closeOnce       sync.Once
+	hostFingerprint string
+	operationDir    string
 }
 
 var knownHostsMu sync.Mutex
@@ -45,6 +47,17 @@ func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 		return nil, err
 	}
 
+	fingerprint := ""
+	verifiedCallback := hostKeyCallback
+	hostKeyCallback = func(host string, addr net.Addr, key ssh.PublicKey) error {
+		if err := verifiedCallback(host, addr, key); err != nil {
+			return err
+		}
+
+		fingerprint = ssh.FingerprintSHA256(key)
+
+		return nil
+	}
 	cfg := &ssh.ClientConfig{
 		User:            dev.User,
 		Auth:            auth,
@@ -59,6 +72,17 @@ func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
+
+	// Bound handshake and SFTP setup as well as TCP dialing.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+
+	deadline := time.Now().Add(15 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+
+	_ = conn.SetDeadline(deadline)
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
@@ -78,7 +102,9 @@ func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 		return nil, fmt.Errorf("sftp open: %w", err)
 	}
 
-	return &Client{cfg: dev, ssh: sshClient, sftp: sftpClient}, nil
+	_ = conn.SetDeadline(time.Time{})
+
+	return &Client{cfg: dev, ssh: sshClient, sftp: sftpClient, hostFingerprint: fingerprint}, nil
 }
 
 func sshAuthMethods(a config.DeviceAuth) ([]ssh.AuthMethod, error) {
@@ -146,13 +172,16 @@ func newHostKeyCallback(dev config.Device) (ssh.HostKeyCallback, error) {
 		if !errors.Is(err, os.ErrNotExist) || !dev.AcceptNewHostKey {
 			return nil, fmt.Errorf("open known hosts %s: %w", knownHostsPath, err)
 		}
+
 		if err := os.MkdirAll(filepath.Dir(knownHostsPath), 0o700); err != nil {
 			return nil, fmt.Errorf("create known-hosts directory: %w", err)
 		}
+
 		f, err := os.OpenFile(knownHostsPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil && !errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("create known hosts %s: %w", knownHostsPath, err)
 		}
+
 		if err == nil {
 			_ = f.Close()
 		}
@@ -184,10 +213,12 @@ func newHostKeyCallback(dev config.Device) (ssh.HostKeyCallback, error) {
 			if err != nil {
 				return err
 			}
+
 			freshErr := freshCheck(hostname, remote, key)
 			if freshErr == nil {
 				return nil
 			}
+
 			var freshKeyErr *knownhosts.KeyError
 			if !errors.As(freshErr, &freshKeyErr) || len(freshKeyErr.Want) != 0 {
 				return freshErr
@@ -197,11 +228,13 @@ func newHostKeyCallback(dev config.Device) (ssh.HostKeyCallback, error) {
 			if err != nil {
 				return fmt.Errorf("seek known hosts: %w", err)
 			}
+
 			if size > 0 {
 				var last [1]byte
 				if _, err := f.ReadAt(last[:], size-1); err != nil {
 					return fmt.Errorf("read known hosts terminator: %w", err)
 				}
+
 				if last[0] != '\n' {
 					if _, err := io.WriteString(f, "\n"); err != nil {
 						return fmt.Errorf("terminate known-hosts line: %w", err)
@@ -213,9 +246,11 @@ func newHostKeyCallback(dev config.Device) (ssh.HostKeyCallback, error) {
 			if _, err := io.WriteString(f, line); err != nil {
 				return fmt.Errorf("write known host: %w", err)
 			}
+
 			if err := f.Sync(); err != nil {
 				return fmt.Errorf("sync known hosts: %w", err)
 			}
+
 			return nil
 		})
 	}, nil

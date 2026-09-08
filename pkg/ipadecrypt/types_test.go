@@ -10,6 +10,7 @@ import (
 
 func TestParseTarget(t *testing.T) {
 	t.Parallel()
+
 	tmp := filepath.Join(t.TempDir(), "sample.ipa")
 	if err := os.WriteFile(tmp, []byte("test"), 0o600); err != nil {
 		t.Fatal(err)
@@ -31,6 +32,7 @@ func TestParseTarget(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("got %#v, want %#v", got, test.want)
 			}
@@ -40,6 +42,7 @@ func TestParseTarget(t *testing.T) {
 
 func TestParseTargetRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
+
 	for _, input := range []string{"", "https://apps.apple.com/us/app/no-id", filepath.Join(t.TempDir(), "missing.ipa")} {
 		if _, err := ParseTarget(input); err == nil {
 			t.Errorf("ParseTarget(%q) unexpectedly succeeded", input)
@@ -49,6 +52,7 @@ func TestParseTargetRejectsInvalidInputs(t *testing.T) {
 
 func TestValidateRequest(t *testing.T) {
 	t.Parallel()
+
 	valid := Request{Target: "com.example", Device: DeviceConfig{Host: "device", KnownHostsPath: "/tmp/known_hosts"}}
 	if err := validateRequest(valid); err != nil {
 		t.Fatalf("valid request rejected: %v", err)
@@ -70,16 +74,21 @@ func TestValidateRequest(t *testing.T) {
 
 func TestCleanupStackIsLIFOAndIdempotent(t *testing.T) {
 	t.Parallel()
+
 	var got []int
+
 	stack := &cleanupStack{}
 	stack.push(func() error { got = append(got, 1); return nil })
 	stack.push(func() error { got = append(got, 2); return errors.New("cleanup") })
+
 	if err := stack.run(); err == nil {
 		t.Fatal("expected cleanup error")
 	}
+
 	if want := []int{2, 1}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("order %v, want %v", got, want)
 	}
+
 	if err := stack.run(); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -87,6 +96,7 @@ func TestCleanupStackIsLIFOAndIdempotent(t *testing.T) {
 
 func TestCacheFilenameCannotEscapeDirectory(t *testing.T) {
 	t.Parallel()
+
 	name := cacheFilename("../../bundle/name", "../version")
 	if filepath.Base(name) != name {
 		t.Fatalf("unsafe cache filename %q", name)

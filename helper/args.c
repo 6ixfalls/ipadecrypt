@@ -61,6 +61,7 @@ const char *args_parse(int argc, char **argv,
             exit(0);
         }
         if (parse_global(a, out_globals)) continue;
+        if (eq(a, "--operation-dir")) { if (++i >= argc) return NULL; out_decrypt->operation_dir = argv[i]; continue; }
         if (eq(a, "--skip-appex")) { out_decrypt->skip_appex = 1; continue; }
         if (eq(a, "--execs-only")) { out_decrypt->execs_only = 1; continue; }
 

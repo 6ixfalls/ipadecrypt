@@ -190,7 +190,9 @@ func (c *Client) LocateAppSync() (string, error) {
 }
 
 func (c *Client) Install(appinstPath, ipaRemote string) error {
-	out, errOut, code, err := c.RunSudo(shellQuote(appinstPath) + " " + shellQuote(ipaRemote))
+	cmd := shellQuote(appinstPath) + " " + shellQuote(ipaRemote)
+
+	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
 		return fmt.Errorf("appinst: %w", err)
 	}
@@ -218,8 +220,7 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 // metadata plist for the bundle id, and the next install spins a fresh
 // one regardless.
 func (c *Client) Uninstall(bundlePath string) error {
-	const bundleRoot = "/var/containers/Bundle/Application/"
-	if !strings.HasPrefix(bundlePath, bundleRoot) {
+	if !ValidBundlePath(bundlePath) {
 		return fmt.Errorf("refuse to uninstall: suspicious bundle path %q", bundlePath)
 	}
 
@@ -287,7 +288,16 @@ func (c *Client) HashFile(target string) (string, error) {
 		return "", fmt.Errorf("shasum exit %d: %s", code, strings.TrimSpace(errOut))
 	}
 
-	return strings.TrimSpace(out), nil
+	digest := strings.TrimSpace(out)
+	if len(digest) != 64 {
+		return "", errors.New("invalid remote SHA-256 result")
+	}
+
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", errors.New("invalid remote SHA-256 result")
+	}
+
+	return strings.ToLower(digest), nil
 }
 
 // InstalledVersion reads CFBundleShortVersionString (falling back to
@@ -336,6 +346,8 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, string, error
 		return "", "", fmt.Errorf("find-by-bundle-id exit %d: %s", code, strings.TrimSpace(errOut))
 	}
 
+	var foundPath, foundID string
+
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		infoPath := strings.TrimSpace(line)
 		if infoPath == "" {
@@ -346,15 +358,19 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, string, error
 
 		got, err := c.bundleIdentifierAt(infoPath)
 		if err != nil {
-			continue
+			return "", "", err
 		}
 
 		if strings.EqualFold(got, bundleID) {
-			return bundlePath, got, nil
+			if foundPath != "" {
+				return "", "", errors.New("multiple installed bundles match ID")
+			}
+
+			foundPath, foundID = bundlePath, got
 		}
 	}
 
-	return "", "", nil
+	return foundPath, foundID, nil
 }
 
 func (c *Client) bundleIdentifierAt(infoPlistPath string) (string, error) {
@@ -420,9 +436,9 @@ func (c *Client) RunHelper(helperPath, bundleID, bundlePath string,
 		gflag = "-v "
 	}
 
-	subflag := ""
+	subflag := c.operationFlags()
 	if skipAppex {
-		subflag = "--skip-appex "
+		subflag += "--skip-appex "
 	}
 
 	cmd := fmt.Sprintf("%s %sdecrypt %s%s %s -",
@@ -447,7 +463,7 @@ func (c *Client) RunHelperExecs(helperPath, bundleID, bundlePath string,
 		gflag = "-v "
 	}
 
-	subflag := "--execs-only "
+	subflag := c.operationFlags() + "--execs-only "
 	if skipAppex {
 		subflag += "--skip-appex "
 	}

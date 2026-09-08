@@ -2,8 +2,10 @@
 #include "decrypt.h"
 #include "fs.h"
 #include "log.h"
+#include "operation.h"
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -12,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
+#include <sys/wait.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -117,8 +121,13 @@ static int run_decrypt(const decrypt_args_t *a) {
     }
 
     char staging[4096];
-    snprintf(staging, sizeof(staging), "/tmp/ipadecrypt-%d", getpid());
-    fs_mkdirs(staging);
+    if (a->operation_dir) {
+        snprintf(staging, sizeof(staging), "%s/dump", a->operation_dir);
+        if (mkdir(staging, 0700)) return 1;
+    } else {
+        snprintf(staging, sizeof(staging), "/tmp/ipadecrypt-XXXXXX");
+        if (!mkdtemp(staging)) return 1;
+    }
     char payload[4096];
     snprintf(payload, sizeof(payload), "%s/Payload", staging);
     mkdir(payload, 0755);
@@ -189,12 +198,48 @@ static int run_decrypt(const decrypt_args_t *a) {
     return 0;
 }
 
+// Confirm that no executable in the target bundle is still running before
+// issuing a completion receipt. Failure to enumerate is uncertainty, not idle.
+extern int proc_listpids(uint32_t, uint32_t, void *, int);
+extern int proc_pidpath(int, void *, uint32_t);
+static int bundle_processes_idle(const char *bundle) {
+    int needed = proc_listpids(1,0,NULL,0);
+    if (needed <= 0 || needed > 16 * 1024 * 1024) return 0;
+    int capacity = needed + 4096;
+    pid_t *pids = malloc((size_t)capacity);
+    if (!pids) return 0;
+    int bytes = proc_listpids(1,0,pids,capacity);
+    if (bytes <= 0 || bytes >= capacity) { free(pids); return 0; }
+    if (strncmp(bundle,"/private/",9) == 0) bundle += 8;
+    size_t n = strlen(bundle);
+    int idle = 1;
+    for (int i = 0; i < bytes / (int)sizeof(pid_t); ++i) {
+        if (pids[i] <= 0 || pids[i] == getpid()) continue;
+        char path[4096];
+        if (proc_pidpath(pids[i],path,sizeof(path)) <= 0) {
+            if (kill(pids[i],0) == 0 || errno != ESRCH) { idle = 0; break; }
+            continue;
+        }
+        const char *p = path;
+        if (strncmp(p,"/private/",9) == 0) p += 8;
+        if (strncmp(p,bundle,n) == 0 && p[n] == '/') { idle = 0; break; }
+    }
+    free(pids); return idle;
+}
+
 int main(int argc, char **argv) {
     // Streaming on stdout (--execs-only frames or `-o -` IPA) would die
     // from default SIGPIPE if the host closes early, skipping fs_rm_rf
     // and leaking /tmp/ipadecrypt-<pid>. Ignore it so write() returns
     // EPIPE and the normal cleanup path runs.
     signal(SIGPIPE, SIG_IGN);
+
+    if (argc == 4 && strcmp(argv[1], "cleanup") == 0)
+        return operation_cleanup(argv[2], argv[3]);
+    if (argc == 5 && strcmp(argv[1], "install") == 0)
+        return operation_app_change(argv[2], argv[3], argv[4], 0);
+    if (argc == 4 && strcmp(argv[1], "uninstall") == 0)
+        return operation_app_change(argv[2], argv[3], NULL, 1);
 
     global_flags_t globals;
     decrypt_args_t da;
@@ -216,7 +261,13 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(sub, "decrypt") == 0) {
-        return run_decrypt(&da);
+        if (!da.operation_dir) return run_decrypt(&da);
+        int d = operation_open(da.operation_dir); if (d < 0) return 1;
+        int lock = operation_lock(d); if (lock < 0) { close(d); return 1; }
+        if (has_receipt(d,"sealed") || has_receipt(d,"helper.done")) { close(lock); close(d); return 1; }
+        int rc = run_decrypt(&da);
+        if (!bundle_processes_idle(da.bundle_src) || receipt(d,"helper.done")) rc = 1;
+        close(lock); close(d); return rc;
     }
 
     er("unknown subcommand: %s", sub);

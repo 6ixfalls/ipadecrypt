@@ -21,6 +21,7 @@
 //                          out-ipa is ignored.
 
 typedef struct {
+    const char *operation_dir; // private, exclusively created operation root
     const char *bundle_id;   // CFBundleIdentifier for SBS, or "" for ptrace-only
     const char *bundle_src;  // installed .app path on disk
     const char *out_ipa;     // output IPA path; ignored when execs_only is set

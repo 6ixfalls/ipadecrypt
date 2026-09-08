@@ -18,6 +18,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		tui.Err("--from-appstore and --use-installed are mutually exclusive; pass at most one.")
 		return
 	}
+
 	if decryptForceUninstall && decryptNoUninstall {
 		tui.Err("--force-uninstall and --no-uninstall are mutually exclusive; pass at most one.")
 		return
@@ -28,9 +29,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		tui.Err("%v", err)
 		return
 	}
+
 	if cfg.Device.Host == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
+
 		return
 	}
 
@@ -46,6 +49,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	} else if decryptUseInstalled {
 		source = lib.SourceInstalled
 	}
+
 	uninstall := lib.UninstallAuto
 	if decryptForceUninstall {
 		uninstall = lib.UninstallAlways
@@ -76,9 +80,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				lastPhase = event.Phase
 				live = tui.NewLive()
 			}
+
 			if event.Message != "" {
 				live.Spin("%s", event.Message)
 			}
+
 			if event.Total > 0 {
 				live.Progress(event.Current, event.Total)
 			}
@@ -87,10 +93,12 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			if !tui.IsTTY() {
 				return false, fmt.Errorf("%s v%s is already installed; pass --use-installed or --from-appstore", installed.BundleID, installed.Version)
 			}
+
 			choice, err := tui.Select(
 				fmt.Sprintf("%s v%s is already installed - which build do you want decrypted?", installed.BundleID, installed.Version),
 				[]string{fmt.Sprintf("Installed on device v%s", installed.Version), "Latest from App Store (will reinstall)"},
 			)
+
 			return choice == 0, err
 		},
 		OnAuthCode: func(_ context.Context) (string, error) {

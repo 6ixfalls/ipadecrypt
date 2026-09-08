@@ -153,3 +153,11 @@ This project was developed with the assistance of AI tools. While I can't guaran
    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=londek/ipadecrypt&type=date&legend=top-left" />
  </picture>
 </a>
+
+### Recoverable cleanup for embedded services
+
+The Go API supports opt-in durable cleanup through `Request.OperationID`,
+`Request.JournalDir`, and `ipadecrypt.Cleanup`. It journals device ownership,
+isolates remote staging, verifies cleanup, and retains clean markers for restart
+recovery. See [the cleanup contract and integration guide](docs/cleanup.md),
+including the cases that still require operator review.

@@ -81,7 +81,7 @@ int fs_copy_file(const char *src, const char *dst) {
     if (in < 0) return -1;
     struct stat st;
     if (fstat(in, &st) != 0) { close(in); return -1; }
-    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+    int out = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, st.st_mode & 0777);
     if (out < 0) { close(in); return -1; }
     char buf[64 * 1024];
     ssize_t n = 0;
@@ -98,15 +98,9 @@ int fs_copy_file(const char *src, const char *dst) {
 int fs_copy_tree(const char *src, const char *dst) {
     struct stat st;
     if (lstat(src, &st) != 0) return -1;
-    if (S_ISLNK(st.st_mode)) {
-        char target[4096];
-        ssize_t n = readlink(src, target, sizeof(target) - 1);
-        if (n < 0) return -1;
-        target[n] = '\0';
-        return symlink(target, dst) == 0 ? 0 : -1;
-    }
+    if (S_ISLNK(st.st_mode)) { errno = ELOOP; return -1; }
     if (S_ISDIR(st.st_mode)) {
-        mkdir(dst, st.st_mode & 0777);
+        if (mkdir(dst, st.st_mode & 0777)) return -1;
         DIR *d = opendir(src);
         if (!d) return -1;
         struct dirent *e;

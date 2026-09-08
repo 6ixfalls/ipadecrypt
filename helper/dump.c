@@ -36,7 +36,7 @@ static dump_result_t write_output(const char *dst, const uint8_t *buf,
     // Break any hardlink staging set up by copy_tree before writing,
     // otherwise O_TRUNC would clobber the original installed bundle.
     unlink(dst);
-    int fd = open(dst, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    int fd = open(dst, O_CREAT | O_WRONLY | O_EXCL | O_NOFOLLOW, 0755);
     if (fd < 0) { er("open dst %s: %s", dst, strerror(errno)); return DUMP_OPEN_DST_FAIL; }
 
     const uint8_t *p = sel->is_fat ? buf + sel->selected.slice.slice_offset : buf;

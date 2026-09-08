@@ -3,9 +3,15 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include <unistd.h>
 
 static int   g_verbose = 0;
 static FILE *g_stream  = NULL; // lazily initialised to stdout
+static uint64_t g_sequence = 0;
+static struct timespec g_started;
+static int g_have_started = 0;
 
 static FILE *stream(void) {
     return g_stream ? g_stream : stdout;
@@ -13,6 +19,10 @@ static FILE *stream(void) {
 
 void log_init(int verbose) {
     g_verbose = verbose ? 1 : 0;
+    if (!g_have_started) {
+        if (clock_gettime(CLOCK_MONOTONIC, &g_started) == 0)
+            g_have_started = 1;
+    }
 }
 
 void log_set_stream(FILE *f) {
@@ -124,6 +134,11 @@ void attrs_hex(attrs_t *a, const char *key, unsigned long long val) {
     attrs_append(a, key, tmp, 1);
 }
 
+void attrs_errno(attrs_t *a, int err) {
+    attrs_int(a, "err", err);
+    attrs_str(a, "error", strerror(err));
+}
+
 void attrs_fmt(attrs_t *a, const char *key, const char *fmt, ...) {
     char tmp[512];
     va_list ap;
@@ -133,13 +148,31 @@ void attrs_fmt(attrs_t *a, const char *key, const char *fmt, ...) {
     attrs_append(a, key, tmp, 0);
 }
 
-void emit(log_level_t level, const char *event_name, const attrs_t *a,
-          const char *human_fmt, ...) {
+static unsigned long long elapsed_ms(void) {
+    if (!g_have_started) return 0;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    int64_t sec = (int64_t)now.tv_sec - (int64_t)g_started.tv_sec;
+    int64_t ns = (int64_t)now.tv_nsec - (int64_t)g_started.tv_nsec;
+    return (unsigned long long)(sec * 1000 + ns / 1000000);
+}
+
+static const char *file_basename(const char *path) {
+    const char *slash = path ? strrchr(path, '/') : NULL;
+    return slash ? slash + 1 : (path ? path : "?");
+}
+
+void log_emit_at(log_level_t level, const char *event_name, const attrs_t *a,
+                 const char *file, int line, const char *function,
+                 const char *human_fmt, ...) {
     if (!log_level_visible(level)) return;
 
     FILE *out = stream();
 
-    fprintf(out, "@evt event=%s level=%s", event_name, level_name(level));
+    fprintf(out, "@evt event=%s level=%s log_seq=%llu log_elapsed_ms=%llu log_pid=%d log_src=%s log_line=%d log_fn=%s",
+            event_name ? event_name : "log", level_name(level),
+            (unsigned long long)++g_sequence, elapsed_ms(), (int)getpid(),
+            file_basename(file), line, function ? function : "?");
 
     if (human_fmt) {
         char buf[1024];
@@ -166,17 +199,21 @@ void emit(log_level_t level, const char *event_name, const attrs_t *a,
 
 // Free-form helpers wrap emit() as event="log". Same level filter; same
 // output channel. No stderr duplication.
-static void free_form(log_level_t level, const char *fmt, va_list ap) {
+static void free_form(log_level_t level, const char *file, int line,
+                      const char *function, const char *fmt, va_list ap) {
     if (!log_level_visible(level)) return;
     char buf[1024];
     vsnprintf(buf, sizeof(buf), fmt, ap);
-    emit(level, "log", NULL, "%s", buf);
+    log_emit_at(level, "log", NULL, file, line, function, "%s", buf);
 }
 
-void dbg(const char *fmt, ...) { va_list ap; va_start(ap, fmt); free_form(LOG_DEBUG, fmt, ap); va_end(ap); }
-void inf(const char *fmt, ...) { va_list ap; va_start(ap, fmt); free_form(LOG_INFO,  fmt, ap); va_end(ap); }
-void wrn(const char *fmt, ...) { va_list ap; va_start(ap, fmt); free_form(LOG_WARN,  fmt, ap); va_end(ap); }
-void er (const char *fmt, ...) { va_list ap; va_start(ap, fmt); free_form(LOG_ERROR, fmt, ap); va_end(ap); }
+void log_free_form_at(log_level_t level, const char *file, int line,
+                      const char *function, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    free_form(level, file, line, function, fmt, ap);
+    va_end(ap);
+}
 
 const char *human_bytes(unsigned long long n) {
     static __thread char buf[32];

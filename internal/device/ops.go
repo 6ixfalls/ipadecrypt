@@ -397,7 +397,7 @@ func (c *Client) bundleIdentifierAt(infoPlistPath string) (string, error) {
 // should exit 2 with a usage string we can recognize. Catches common issues
 // (binary not executable, sudo denied, missing codesign).
 func (c *Client) VerifyHelper(helperPath string) error {
-	cmd := fmt.Sprintf("%s 2>&1 | head -1", shellQuote(helperPath))
+	cmd := fmt.Sprintf("%s 2>&1", shellQuote(helperPath))
 
 	out, _, _, err := c.RunSudo(cmd)
 	if err != nil {

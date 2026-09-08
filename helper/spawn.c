@@ -35,37 +35,43 @@ static int load_sbs(void) {
     void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_NOW);
     void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
     if (!cf || !sbs) {
-        dbg("SBS unavailable (cf=%p sbs=%p)", cf, sbs);
+        attrs_t a; attrs_init(&a); attrs_int(&a, "core_foundation", cf != NULL); attrs_int(&a, "springboard_services", sbs != NULL);
+        const char *detail = dlerror(); if (detail) attrs_str(&a, "dlerror", detail);
+        emit(LOG_WARN, "spawn.sbs.load_failed", &a, "SBS frameworks unavailable");
         return -1;
     }
     CFStringCreateWithCString_ = dlsym(cf, "CFStringCreateWithCString");
     CFRelease_                 = dlsym(cf, "CFRelease");
     SBSLaunch_                 = dlsym(sbs, "SBSLaunchApplicationWithIdentifier");
     if (!CFStringCreateWithCString_ || !CFRelease_ || !SBSLaunch_) {
-        wrn("SBS missing symbols");
+        attrs_t a; attrs_init(&a); attrs_int(&a, "cfstring", CFStringCreateWithCString_ != NULL); attrs_int(&a, "cfrelease", CFRelease_ != NULL); attrs_int(&a, "launch", SBSLaunch_ != NULL);
+        emit(LOG_WARN, "spawn.sbs.symbols_missing", &a, "SBS is missing required symbols");
         return -1;
     }
     return 0;
 }
 
 static pid_t find_pid_by_path(const char *exec_path, int ms_budget) {
+    attrs_t begin; attrs_init(&begin); attrs_str(&begin, "exec", exec_path); attrs_int(&begin, "budget_ms", ms_budget); emit(LOG_DEBUG, "spawn.pid_lookup.begin", &begin, NULL);
     for (int slept = 0; slept < ms_budget; slept += 50) {
         int n = proc_listallpids(NULL, 0);
         if (n <= 0) { usleep(50 * 1000); continue; }
         pid_t *buf = malloc(n * sizeof(pid_t));
-        if (!buf) return 0;
+        if (!buf) { emit(LOG_ERROR, "spawn.pid_lookup.oom", NULL, "could not allocate PID list"); return 0; }
         int got = proc_listallpids(buf, n * sizeof(pid_t)) / sizeof(pid_t);
         for (int i = 0; i < got; i++) {
             char p[4096];
             if (proc_pidpath(buf[i], p, sizeof(p)) > 0 && fs_path_equiv(p, exec_path)) {
                 pid_t pid = buf[i];
                 free(buf);
+                attrs_t a; attrs_init(&a); attrs_int(&a, "pid", pid); attrs_str(&a, "exec", exec_path); emit(LOG_DEBUG, "spawn.pid_lookup.done", &a, NULL);
                 return pid;
             }
         }
         free(buf);
         usleep(50 * 1000);
     }
+    emit(LOG_WARN, "spawn.pid_lookup.timeout", &begin, "target PID was not found before timeout");
     return 0;
 }
 
@@ -171,20 +177,21 @@ static void cs_mark_debugged(task_t task, pid_t pid) {
 
 static int sbs_launch(const char *bundle_id, const char *exec_path,
                       pid_t *out_pid, task_t *out_task) {
+    attrs_t begin; attrs_init(&begin); attrs_str(&begin, "bundle_id", bundle_id); attrs_str(&begin, "exec", exec_path); emit(LOG_DEBUG, "spawn.sbs.begin", &begin, NULL);
     if (load_sbs() != 0) return -1;
     cf_string_t bid = CFStringCreateWithCString_(NULL, bundle_id, 0x08000100);
-    if (!bid) return -1;
+    if (!bid) { emit(LOG_ERROR, "spawn.sbs.bundle_id_failed", &begin, "could not create bundle identifier string"); return -1; }
     int rc = SBSLaunch_(bid, 1);
     CFRelease_(bid);
     if (rc != 0) {
-        dbg("SBSLaunch(%s)=%d", bundle_id, rc);
+        attrs_int(&begin, "result", rc); emit(LOG_WARN, "spawn.sbs.rejected", &begin, "SBS launch rejected %s", bundle_id);
         return -1;
     }
     pid_t pid = find_pid_by_path(exec_path, 2000);
-    if (pid == 0) { dbg("SBS launch produced no pid"); return -1; }
+    if (pid == 0) return -1;
     task_t task = MACH_PORT_NULL;
     if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS) {
-        dbg("task_for_pid(%d) after SBS failed", pid);
+        attrs_t a; attrs_init(&a); attrs_int(&a, "pid", pid); emit(LOG_ERROR, "spawn.sbs.task_failed", &a, "task_for_pid failed after SBS launch");
         kill(pid, SIGKILL);
         return -1;
     }
@@ -210,6 +217,7 @@ static int sbs_launch(const char *bundle_id, const char *exec_path,
 // resuming, so we don't need to mark the target debugged  it never
 // runs a single instruction past exec.
 static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
+    attrs_t begin; attrs_init(&begin); attrs_str(&begin, "exec", exec_path); emit(LOG_DEBUG, "spawn.ptrace.begin", &begin, NULL);
     pid_t pid = fork();
     if (pid < 0) { er("fork: %s", strerror(errno)); return -1; }
     if (pid == 0) {
@@ -220,20 +228,23 @@ static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
         execve(exec_path, argv, environ);
         _exit(127);
     }
-    int status;
+    int status = 0;
     pid_t w;
     do { w = waitpid(pid, &status, WUNTRACED); } while (w < 0 && errno == EINTR);
     if (w < 0 || WIFEXITED(status) || WIFSIGNALED(status)) {
-        er("child died during exec of %s (status=0x%x)", exec_path, status);
+        attrs_t a; attrs_init(&a); attrs_str(&a, "exec", exec_path); attrs_int(&a, "wait_result", w); attrs_hex(&a, "status", (unsigned int)status); if (w < 0) attrs_errno(&a, errno);
+        emit(LOG_ERROR, "spawn.ptrace.child_failed", &a, "child failed during exec of %s", exec_path);
         return -1;
     }
     *out_pid = pid;
+    attrs_int(&begin, "pid", pid); attrs_hex(&begin, "status", (unsigned int)status); emit(LOG_DEBUG, "spawn.ptrace.ready", &begin, NULL);
     return 0;
 }
 
 // ----- Main entry points -----------------------------------------------------
 
 int spawn_find_main_name(const char *bundle, char *out, size_t cap) {
+    attrs_t begin; attrs_init(&begin); attrs_str(&begin, "bundle", bundle); emit(LOG_DEBUG, "spawn.main_lookup.begin", &begin, NULL);
     char base[1024];
     strncpy(base, bundle, sizeof(base) - 1); base[sizeof(base) - 1] = '\0';
     char *slash = strrchr(base, '/');
@@ -245,10 +256,11 @@ int spawn_find_main_name(const char *bundle, char *out, size_t cap) {
     if (fs_is_macho(cand)) {
         const char *bn = strrchr(cand, '/'); bn = bn ? bn + 1 : cand;
         strncpy(out, bn, cap - 1); out[cap - 1] = '\0';
+        attrs_str(&begin, "main", out); attrs_str(&begin, "method", "bundle_name"); emit(LOG_DEBUG, "spawn.main_lookup.done", &begin, NULL);
         return 0;
     }
     DIR *d = opendir(bundle);
-    if (!d) return -1;
+    if (!d) { LOG_ERRNO("spawn.main_lookup.open_failed", "opendir %s failed: %s", bundle, strerror(errno)); return -1; }
     struct dirent *e;
     while ((e = readdir(d))) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
@@ -258,10 +270,12 @@ int spawn_find_main_name(const char *bundle, char *out, size_t cap) {
         if (fs_is_macho(p)) {
             strncpy(out, e->d_name, cap - 1); out[cap - 1] = '\0';
             closedir(d);
+            attrs_str(&begin, "main", out); attrs_str(&begin, "method", "directory_scan"); emit(LOG_DEBUG, "spawn.main_lookup.done", &begin, NULL);
             return 0;
         }
     }
     closedir(d);
+    emit(LOG_WARN, "spawn.main_lookup.not_found", &begin, "no Mach-O executable found in bundle");
     return -1;
 }
 

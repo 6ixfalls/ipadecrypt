@@ -30,11 +30,13 @@ static int is_stdout_target(const char *path) {
 // Stream one Mach-O file as a framed record on stdout. Frame:
 //   [u32be plen][plen-byte path][u64be size][size bytes]
 static int emit_macho_frame(const char *relpath, const char *abs_path) {
+    attrs_t trace; attrs_init(&trace); attrs_str(&trace, "path", relpath); attrs_str(&trace, "source", abs_path);
+    emit(LOG_DEBUG, "stream.frame.begin", &trace, NULL);
     int fd = open(abs_path, O_RDONLY);
-    if (fd < 0) { er("open %s: %s", abs_path, strerror(errno)); return -1; }
+    if (fd < 0) { LOG_ERRNO("stream.frame.open_failed", "open %s failed: %s", abs_path, strerror(errno)); return -1; }
 
     struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); return -1; }
+    if (fstat(fd, &st) != 0) { LOG_ERRNO("stream.frame.stat_failed", "fstat %s failed: %s", abs_path, strerror(errno)); close(fd); return -1; }
 
     uint64_t size = (uint64_t)st.st_size;
     uint32_t plen = (uint32_t)strlen(relpath);
@@ -53,12 +55,14 @@ static int emit_macho_frame(const char *relpath, const char *abs_path) {
     char buf[64 * 1024];
     for (;;) {
         ssize_t n = read(fd, buf, sizeof(buf));
-        if (n < 0) { if (errno == EINTR) continue; close(fd); return -1; }
+        if (n < 0) { if (errno == EINTR) continue; LOG_ERRNO("stream.frame.read_failed", "read %s failed: %s", abs_path, strerror(errno)); close(fd); return -1; }
         if (n == 0) break;
         if (fs_write_all(1, buf, (size_t)n) != 0) { close(fd); return -1; }
     }
 
     close(fd);
+    attrs_uint(&trace, "size", size);
+    emit(LOG_DEBUG, "stream.frame.done", &trace, NULL);
     return 0;
 }
 
@@ -80,11 +84,11 @@ static int emit_machos_recursive(const char *root, const char *rel) {
     else        snprintf(abs, sizeof(abs), "%s", root);
 
     struct stat st;
-    if (lstat(abs, &st) != 0) return 0;
+    if (lstat(abs, &st) != 0) { LOG_ERRNO("stream.walk.stat_failed", "lstat %s failed: %s", abs, strerror(errno)); return 0; }
 
     if (S_ISDIR(st.st_mode)) {
         DIR *d = opendir(abs);
-        if (!d) return 0;
+        if (!d) { LOG_ERRNO("stream.walk.open_failed", "opendir %s failed: %s", abs, strerror(errno)); return 0; }
 
         struct dirent *e;
         int rc = 0;
@@ -110,6 +114,13 @@ static int emit_machos_recursive(const char *root, const char *rel) {
 }
 
 static int run_decrypt(const decrypt_args_t *a) {
+    attrs_t run; attrs_init(&run);
+    attrs_str(&run, "bundle_src", a->bundle_src);
+    attrs_str(&run, "bundle_id", a->bundle_id ? a->bundle_id : "");
+    attrs_str(&run, "output", a->out_ipa ? a->out_ipa : "");
+    attrs_int(&run, "skip_appex", a->skip_appex);
+    attrs_int(&run, "execs_only", a->execs_only);
+    emit(LOG_INFO, "decrypt.begin", &run, "starting helper decryption");
     // Resolve bundle basename for the staging Payload/ layout.
     char src_copy[4096];
     snprintf(src_copy, sizeof(src_copy), "%s", a->bundle_src);
@@ -123,14 +134,14 @@ static int run_decrypt(const decrypt_args_t *a) {
     char staging[4096];
     if (a->operation_dir) {
         snprintf(staging, sizeof(staging), "%s/dump", a->operation_dir);
-        if (mkdir(staging, 0700)) return 1;
+        if (mkdir(staging, 0700)) { LOG_ERRNO("staging.mkdir_failed", "mkdir %s failed: %s", staging, strerror(errno)); return 1; }
     } else {
         snprintf(staging, sizeof(staging), "/tmp/ipadecrypt-XXXXXX");
-        if (!mkdtemp(staging)) return 1;
+        if (!mkdtemp(staging)) { LOG_ERRNO("staging.mkdtemp_failed", "mkdtemp failed: %s", strerror(errno)); return 1; }
     }
     char payload[4096];
     snprintf(payload, sizeof(payload), "%s/Payload", staging);
-    mkdir(payload, 0755);
+    if (mkdir(payload, 0755) != 0) { LOG_ERRNO("staging.payload_failed", "mkdir %s failed: %s", payload, strerror(errno)); fs_rm_rf(staging); return 1; }
     char bundle_dst[4096];
     snprintf(bundle_dst, sizeof(bundle_dst), "%s/%s", payload, app_name);
 
@@ -204,12 +215,15 @@ extern int proc_listpids(uint32_t, uint32_t, void *, int);
 extern int proc_pidpath(int, void *, uint32_t);
 static int bundle_processes_idle(const char *bundle) {
     int needed = proc_listpids(1,0,NULL,0);
-    if (needed <= 0 || needed > 16 * 1024 * 1024) return 0;
+    if (needed <= 0 || needed > 16 * 1024 * 1024) {
+        attrs_t a; attrs_init(&a); attrs_int(&a, "bytes", needed); attrs_int(&a, "err", errno);
+        emit(LOG_ERROR, "operation.process_list_failed", &a, "could not size process list"); return 0;
+    }
     int capacity = needed + 4096;
     pid_t *pids = malloc((size_t)capacity);
-    if (!pids) return 0;
+    if (!pids) { emit(LOG_ERROR, "operation.process_list_oom", NULL, "could not allocate process list"); return 0; }
     int bytes = proc_listpids(1,0,pids,capacity);
-    if (bytes <= 0 || bytes >= capacity) { free(pids); return 0; }
+    if (bytes <= 0 || bytes >= capacity) { attrs_t a; attrs_init(&a); attrs_int(&a, "bytes", bytes); attrs_int(&a, "capacity", capacity); emit(LOG_ERROR, "operation.process_list_incomplete", &a, NULL); free(pids); return 0; }
     if (strncmp(bundle,"/private/",9) == 0) bundle += 8;
     size_t n = strlen(bundle);
     int idle = 1;
@@ -217,12 +231,12 @@ static int bundle_processes_idle(const char *bundle) {
         if (pids[i] <= 0 || pids[i] == getpid()) continue;
         char path[4096];
         if (proc_pidpath(pids[i],path,sizeof(path)) <= 0) {
-            if (kill(pids[i],0) == 0 || errno != ESRCH) { idle = 0; break; }
+            if (kill(pids[i],0) == 0 || errno != ESRCH) { attrs_t a; attrs_init(&a); attrs_int(&a, "pid", pids[i]); emit(LOG_WARN, "operation.process_unknown", &a, "live process path could not be inspected"); idle = 0; break; }
             continue;
         }
         const char *p = path;
         if (strncmp(p,"/private/",9) == 0) p += 8;
-        if (strncmp(p,bundle,n) == 0 && p[n] == '/') { idle = 0; break; }
+        if (strncmp(p,bundle,n) == 0 && p[n] == '/') { attrs_t a; attrs_init(&a); attrs_int(&a, "pid", pids[i]); attrs_str(&a, "path", p); emit(LOG_WARN, "operation.process_busy", &a, "bundle process is still running"); idle = 0; break; }
     }
     free(pids); return idle;
 }
@@ -234,12 +248,28 @@ int main(int argc, char **argv) {
     // EPIPE and the normal cleanup path runs.
     signal(SIGPIPE, SIG_IGN);
 
-    if (argc == 4 && strcmp(argv[1], "cleanup") == 0)
-        return operation_cleanup(argv[2], argv[3]);
-    if (argc == 5 && strcmp(argv[1], "install") == 0)
-        return operation_app_change(argv[2], argv[3], argv[4], 0);
-    if (argc == 4 && strcmp(argv[1], "uninstall") == 0)
-        return operation_app_change(argv[2], argv[3], NULL, 1);
+    // Operation subcommands bypass normal argument parsing, but they still
+    // need a structured diagnostic when their fail-closed checks reject an
+    // operation. Their stdout is captured by the Go caller.
+    log_init(0);
+    if (argc == 4 && strcmp(argv[1], "cleanup") == 0) {
+        int rc = operation_cleanup(argv[2], argv[3]);
+        if (rc) emit(LOG_ERROR, "cleanup.failed", NULL,
+                     "operation cleanup could not be confirmed");
+        return rc;
+    }
+    if (argc == 5 && strcmp(argv[1], "install") == 0) {
+        int rc = operation_app_change(argv[2], argv[3], argv[4], 0);
+        if (rc) emit(LOG_ERROR, "install.failed", NULL,
+                     "operation install could not be confirmed");
+        return rc;
+    }
+    if (argc == 4 && strcmp(argv[1], "uninstall") == 0) {
+        int rc = operation_app_change(argv[2], argv[3], NULL, 1);
+        if (rc) emit(LOG_ERROR, "uninstall.failed", NULL,
+                     "operation uninstall could not be confirmed");
+        return rc;
+    }
 
     global_flags_t globals;
     decrypt_args_t da;
@@ -261,12 +291,44 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(sub, "decrypt") == 0) {
-        if (!da.operation_dir) return run_decrypt(&da);
-        int d = operation_open(da.operation_dir); if (d < 0) return 1;
-        int lock = operation_lock(d); if (lock < 0) { close(d); return 1; }
-        if (has_receipt(d,"sealed") || has_receipt(d,"helper.done")) { close(lock); close(d); return 1; }
+        attrs_t start; attrs_init(&start); attrs_str(&start, "subcommand", sub);
+        attrs_int(&start, "argc", argc); attrs_int(&start, "verbose", globals.verbose);
+        emit(LOG_INFO, "helper.start", &start, "running %s", sub);
+        if (!da.operation_dir) {
+            int rc = run_decrypt(&da);
+            if (rc) emit(LOG_ERROR, "decrypt.failed", NULL,
+                         "helper decryption failed");
+            return rc;
+        }
+        int d = operation_open(da.operation_dir);
+        if (d < 0) {
+            emit(LOG_ERROR, "operation.open_failed", NULL,
+                 "could not open the operation directory");
+            return 1;
+        }
+        int lock = operation_lock(d);
+        if (lock < 0) {
+            emit(LOG_ERROR, "operation.lock_failed", NULL,
+                 "could not acquire the operation lock");
+            close(d); return 1;
+        }
+        if (has_receipt(d,"sealed") || has_receipt(d,"helper.done")) {
+            emit(LOG_ERROR, "operation.rejected", NULL,
+                 "operation was already sealed or completed");
+            close(lock); close(d); return 1;
+        }
         int rc = run_decrypt(&da);
-        if (!bundle_processes_idle(da.bundle_src) || receipt(d,"helper.done")) rc = 1;
+        if (!bundle_processes_idle(da.bundle_src)) {
+            emit(LOG_ERROR, "operation.target_busy", NULL,
+                 "target processes did not become idle");
+            rc = 1;
+        } else if (receipt(d,"helper.done")) {
+            emit(LOG_ERROR, "operation.receipt_failed", NULL,
+                 "could not persist the helper completion receipt");
+            rc = 1;
+        }
+        if (rc) emit(LOG_ERROR, "decrypt.failed", NULL,
+                     "helper decryption failed");
         close(lock); close(d); return rc;
     }
 

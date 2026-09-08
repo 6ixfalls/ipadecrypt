@@ -1,6 +1,8 @@
 #include "macho.h"
+#include "log.h"
 
 #include <fcntl.h>
+#include <errno.h>
 #include <libkern/OSByteOrder.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
@@ -126,16 +128,18 @@ int select_runtime_slice(const char *path,
                          selected_slice_t *out) {
     memset(out, 0, sizeof(*out));
 
+    attrs_t begin; attrs_init(&begin); attrs_str(&begin, "path", path); attrs_int(&begin, "cputype", rt->cputype); attrs_int(&begin, "cpusubtype", rt->cpusubtype); emit(LOG_DEBUG, "macho.select.begin", &begin, NULL);
+
     int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
+    if (fd < 0) { LOG_ERRNO("macho.open_failed", "open %s failed: %s", path, strerror(errno)); return -1; }
     struct stat st;
-    if (fstat(fd, &st) < 0) { close(fd); return -1; }
-    if (st.st_size < (off_t)sizeof(struct fat_header)) { close(fd); return 0; }
+    if (fstat(fd, &st) < 0) { LOG_ERRNO("macho.stat_failed", "fstat %s failed: %s", path, strerror(errno)); close(fd); return -1; }
+    if (st.st_size < (off_t)sizeof(struct fat_header)) { attrs_int(&begin, "size", st.st_size); emit(LOG_WARN, "macho.too_small", &begin, NULL); close(fd); return 0; }
 
     size_t file_sz = (size_t)st.st_size;
     void *map = mmap(NULL, file_sz, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-    if (map == MAP_FAILED) return -1;
+    if (map == MAP_FAILED) { LOG_ERRNO("macho.map_failed", "mmap %s failed: %s", path, strerror(errno)); return -1; }
 
     int rc = 0;
     const uint8_t *base = map;
@@ -185,6 +189,7 @@ int select_runtime_slice(const char *path,
 
 done:
     munmap(map, file_sz);
+    attrs_int(&begin, "result", rc); attrs_int(&begin, "fat", out->is_fat); attrs_int(&begin, "encrypted", out->any_slice_encrypted); emit(rc < 0 ? LOG_WARN : LOG_DEBUG, "macho.select.done", &begin, NULL);
     return rc;
 }
 
@@ -264,15 +269,16 @@ static int collect_deps_from_slice(const uint8_t *slice, size_t slice_len,
 int macho_collect_deps(const char *path, const runtime_image_t *rt,
                        macho_deps_t *out) {
     memset(out, 0, sizeof(*out));
+    attrs_t begin; attrs_init(&begin); attrs_str(&begin, "path", path); emit(LOG_DEBUG, "macho.deps.begin", &begin, NULL);
     int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
+    if (fd < 0) { LOG_ERRNO("macho.deps.open_failed", "open %s failed: %s", path, strerror(errno)); return -1; }
     struct stat st;
-    if (fstat(fd, &st) < 0) { close(fd); return -1; }
+    if (fstat(fd, &st) < 0) { LOG_ERRNO("macho.deps.stat_failed", "fstat %s failed: %s", path, strerror(errno)); close(fd); return -1; }
     if (st.st_size < (off_t)sizeof(struct fat_header)) { close(fd); return 0; }
     size_t file_sz = (size_t)st.st_size;
     void *map = mmap(NULL, file_sz, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-    if (map == MAP_FAILED) return -1;
+    if (map == MAP_FAILED) { LOG_ERRNO("macho.deps.map_failed", "mmap %s failed: %s", path, strerror(errno)); return -1; }
 
     int rc = 0;
     const uint8_t *base = map;
@@ -311,6 +317,7 @@ int macho_collect_deps(const char *path, const runtime_image_t *rt,
 done:
     munmap(map, file_sz);
     if (rc < 0) { macho_deps_free(out); }
+    attrs_int(&begin, "result", rc); attrs_int(&begin, "dependencies", out->dep_count); attrs_int(&begin, "rpaths", out->rpath_count); emit(rc < 0 ? LOG_WARN : LOG_DEBUG, "macho.deps.done", &begin, NULL);
     return rc;
 }
 

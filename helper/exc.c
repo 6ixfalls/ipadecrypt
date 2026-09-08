@@ -9,9 +9,13 @@ thread_act_t      g_pending_exc_thread = MACH_PORT_NULL;
 int               g_dyld_force_weak_active = 0;
 
 mach_port_t exc_make_port(task_t task) {
+    emit(LOG_DEBUG, "exc.port.begin", NULL, NULL);
     mach_port_t port = MACH_PORT_NULL;
-    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) != KERN_SUCCESS) return MACH_PORT_NULL;
-    if (mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS) {
+    kern_return_t alloc_kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (alloc_kr != KERN_SUCCESS) { LOG_MACH("exc.port.allocate_failed", alloc_kr, "could not allocate exception port"); return MACH_PORT_NULL; }
+    kern_return_t insert_kr = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+    if (insert_kr != KERN_SUCCESS) {
+        LOG_MACH("exc.port.insert_failed", insert_kr, "could not create exception send right");
         mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
         return MACH_PORT_NULL;
     }
@@ -21,14 +25,17 @@ mach_port_t exc_make_port(task_t task) {
     // changes for EXC_CRASH'd threads (verified empirically on Swift
     // Playgrounds); STATE_IDENTITY forces the kernel to apply our new
     // state on exception-handled resume.
-    if (task_set_exception_ports(task,
+    kern_return_t set_kr = task_set_exception_ports(task,
         EXC_MASK_CRASH | EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION |
         EXC_MASK_SOFTWARE | EXC_MASK_ARITHMETIC | EXC_MASK_BREAKPOINT |
         EXC_MASK_GUARD,
-        port, EXCEPTION_STATE_IDENTITY, ARM_THREAD_STATE64) != KERN_SUCCESS) {
+        port, EXCEPTION_STATE_IDENTITY, ARM_THREAD_STATE64);
+    if (set_kr != KERN_SUCCESS) {
+        LOG_MACH("exc.port.configure_failed", set_kr, "could not configure target exception port");
         mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
         return MACH_PORT_NULL;
     }
+    attrs_t a; attrs_init(&a); attrs_uint(&a, "port", port); emit(LOG_DEBUG, "exc.port.ready", &a, NULL);
     return port;
 }
 
@@ -53,8 +60,10 @@ const char *exc_tag(int exc) {
 
 mach_msg_return_t exc_reply_with_state(const mach_msg_header_t *received_hdr,
                                        const arm_thread_state64_t *new_state) {
-    if (!received_hdr || received_hdr->msgh_remote_port == MACH_PORT_NULL)
+    if (!received_hdr || received_hdr->msgh_remote_port == MACH_PORT_NULL) {
+        emit(LOG_ERROR, "exc.reply.invalid", NULL, "exception reply has no destination");
         return MACH_SEND_INVALID_DEST;
+    }
     struct {
         mach_msg_header_t hdr;
         char ndr[8];
@@ -81,19 +90,22 @@ mach_msg_return_t exc_reply_with_state(const mach_msg_header_t *received_hdr,
         reply.hdr.msgh_size = (mach_msg_size_t)(
             sizeof(mach_msg_header_t) + 8 + 4 + 4 + 4);
     }
-    return mach_msg(&reply.hdr, MACH_SEND_MSG, reply.hdr.msgh_size, 0,
+    mach_msg_return_t mr = mach_msg(&reply.hdr, MACH_SEND_MSG, reply.hdr.msgh_size, 0,
              MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (mr != MACH_MSG_SUCCESS) { attrs_t a; attrs_init(&a); attrs_int(&a, "mach_msg", mr); emit(LOG_ERROR, "exc.reply.failed", &a, NULL); }
+    else emit(LOG_DEBUG, "exc.reply.sent", NULL, NULL);
+    return mr;
 }
 
 int exc_decode(const void *buf, mach_msg_size_t buf_sz,
                int *exc_out, int64_t *code0_out,
                int64_t *code1_out, int *signal_out,
                arm_thread_state64_t *out_state) {
-    if (buf_sz < 76) return 0;
+    if (buf_sz < 76) { attrs_t a; attrs_init(&a); attrs_uint(&a, "size", buf_sz); emit(LOG_WARN, "exc.decode.short", &a, NULL); return 0; }
     const uint8_t *p = (const uint8_t *)buf;
     mach_msg_header_t hdr;
     memcpy(&hdr, p, sizeof(hdr));
-    if (hdr.msgh_id != 2401 && hdr.msgh_id != 2403) return 0;
+    if (hdr.msgh_id != 2401 && hdr.msgh_id != 2403) { attrs_t a; attrs_init(&a); attrs_int(&a, "message_id", hdr.msgh_id); emit(LOG_WARN, "exc.decode.unknown", &a, NULL); return 0; }
 
     int exc; uint32_t code_cnt;
     memcpy(&exc, p + 60, sizeof(exc));
@@ -106,6 +118,7 @@ int exc_decode(const void *buf, mach_msg_size_t buf_sz,
     *code0_out = c0;
     *code1_out = c1;
     *signal_out = (exc == EXC_CRASH) ? ((c0 >> 24) & 0xff) : 0;
+    attrs_t a; attrs_init(&a); attrs_str(&a, "exception", exc_tag(exc)); attrs_hex(&a, "code0", (unsigned long long)c0); attrs_hex(&a, "code1", (unsigned long long)c1); attrs_int(&a, "signal", *signal_out); emit(LOG_DEBUG, "exc.decoded", &a, NULL);
 
     if (hdr.msgh_id == 2403 && out_state) {
         size_t codes_end = 68 + (size_t)code_cnt * 4;

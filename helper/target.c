@@ -8,14 +8,16 @@
 #include <string.h>
 
 int target_find_main_base(task_t task, mach_vm_address_t *out) {
+    emit(LOG_DEBUG, "target.main_base.begin", NULL, NULL);
     mach_vm_address_t addr = 0;
     for (;;) {
         mach_vm_size_t sz = 0;
         vm_region_basic_info_data_64_t info;
         mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
         mach_port_t obj = MACH_PORT_NULL;
-        if (mach_vm_region(task, &addr, &sz, VM_REGION_BASIC_INFO_64,
-                (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return -1;
+        kern_return_t region_kr = mach_vm_region(task, &addr, &sz, VM_REGION_BASIC_INFO_64,
+                (vm_region_info_t)&info, &cnt, &obj);
+        if (region_kr != KERN_SUCCESS) { LOG_MACH("target.region_failed", region_kr, "could not enumerate target memory"); return -1; }
         if (obj != MACH_PORT_NULL)
             mach_port_deallocate(mach_task_self(), obj);
         struct mach_header_64 hdr;
@@ -26,9 +28,10 @@ int target_find_main_base(task_t task, mach_vm_address_t *out) {
             (hdr.magic == MH_MAGIC_64 || hdr.magic == MH_MAGIC) &&
             hdr.filetype == MH_EXECUTE) {
             *out = addr;
+            attrs_t a; attrs_init(&a); attrs_hex(&a, "base", (unsigned long long)addr); emit(LOG_DEBUG, "target.main_base", &a, NULL);
             return 0;
         }
-        if (sz == 0 || addr + sz <= addr) return -1;
+        if (sz == 0 || addr + sz <= addr) { emit(LOG_ERROR, "target.region_invalid", NULL, "target memory region did not advance"); return -1; }
         addr += sz;
     }
 }
@@ -37,12 +40,15 @@ int target_read_runtime_image(task_t task, mach_vm_address_t base,
                               runtime_image_t *out) {
     struct mach_header_64 hdr;
     mach_vm_size_t got = 0;
-    if (mach_vm_read_overwrite(task, base, sizeof(hdr),
-            (mach_vm_address_t)(uintptr_t)&hdr, &got) != KERN_SUCCESS ||
+    kern_return_t read_kr = mach_vm_read_overwrite(task, base, sizeof(hdr),
+            (mach_vm_address_t)(uintptr_t)&hdr, &got);
+    if (read_kr != KERN_SUCCESS ||
         got != sizeof(hdr)) {
+        attrs_t a; attrs_init(&a); attrs_int(&a, "kr", read_kr); attrs_hex(&a, "base", (unsigned long long)base); attrs_uint(&a, "got", got);
+        emit(LOG_WARN, "target.header_read_failed", &a, NULL);
         return -1;
     }
-    if (hdr.magic != MH_MAGIC && hdr.magic != MH_MAGIC_64) return -1;
+    if (hdr.magic != MH_MAGIC && hdr.magic != MH_MAGIC_64) { attrs_t a; attrs_init(&a); attrs_hex(&a, "base", (unsigned long long)base); attrs_hex(&a, "magic", hdr.magic); emit(LOG_WARN, "target.header_invalid", &a, NULL); return -1; }
     out->is_64 = (hdr.magic == MH_MAGIC_64);
     out->cputype = hdr.cputype;
     out->cpusubtype = hdr.cpusubtype;
@@ -54,25 +60,28 @@ struct dyld_image_info *target_list_images(task_t task,
                                             char **out_paths) {
     struct task_dyld_info tdi;
     mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
-    if (task_info(task, TASK_DYLD_INFO, (task_info_t)&tdi, &cnt) != KERN_SUCCESS)
-        return NULL;
+    kern_return_t info_kr = task_info(task, TASK_DYLD_INFO, (task_info_t)&tdi, &cnt);
+    if (info_kr != KERN_SUCCESS) { LOG_MACH("target.images.info_failed", info_kr, "could not read task dyld info"); return NULL; }
     struct dyld_all_image_infos aii;
     mach_vm_size_t n = 0;
-    if (mach_vm_read_overwrite(task, tdi.all_image_info_addr, sizeof(aii),
-            (mach_vm_address_t)(uintptr_t)&aii, &n) != KERN_SUCCESS) return NULL;
-    if (aii.infoArrayCount == 0 || aii.infoArray == NULL) return NULL;
+    kern_return_t aii_kr = mach_vm_read_overwrite(task, tdi.all_image_info_addr, sizeof(aii),
+            (mach_vm_address_t)(uintptr_t)&aii, &n);
+    if (aii_kr != KERN_SUCCESS) { LOG_MACH("target.images.header_failed", aii_kr, "could not read dyld image header"); return NULL; }
+    if (aii.infoArrayCount == 0 || aii.infoArray == NULL) { emit(LOG_WARN, "target.images.empty", NULL, "target reported no dyld images"); return NULL; }
 
     size_t arr_sz = sizeof(struct dyld_image_info) * aii.infoArrayCount;
     struct dyld_image_info *infos = malloc(arr_sz);
-    if (!infos) return NULL;
-    if (mach_vm_read_overwrite(task, (mach_vm_address_t)aii.infoArray, arr_sz,
-            (mach_vm_address_t)(uintptr_t)infos, &n) != KERN_SUCCESS) {
+    if (!infos) { emit(LOG_ERROR, "target.images.oom", NULL, "could not allocate image array"); return NULL; }
+    kern_return_t array_kr = mach_vm_read_overwrite(task, (mach_vm_address_t)aii.infoArray, arr_sz,
+            (mach_vm_address_t)(uintptr_t)infos, &n);
+    if (array_kr != KERN_SUCCESS) {
+        LOG_MACH("target.images.array_failed", array_kr, "could not read dyld image array");
         free(infos); return NULL;
     }
 
     size_t path_cap = aii.infoArrayCount * 4096;
     char *paths = malloc(path_cap);
-    if (!paths) { free(infos); return NULL; }
+    if (!paths) { emit(LOG_ERROR, "target.images.paths_oom", NULL, "could not allocate image paths"); free(infos); return NULL; }
     size_t off = 0;
     for (uint32_t i = 0; i < aii.infoArrayCount; i++) {
         char *slot = paths + off;
@@ -86,11 +95,13 @@ struct dyld_image_info *target_list_images(task_t task,
             infos[i].imageFilePath = slot;
             off += len + 1;
         } else {
+            attrs_t a; attrs_init(&a); attrs_uint(&a, "index", i); emit(LOG_DEBUG, "target.image.path_failed", &a, NULL);
             infos[i].imageFilePath = NULL;
         }
     }
     *out_count = aii.infoArrayCount;
     *out_paths = paths;
+    attrs_t a; attrs_init(&a); attrs_uint(&a, "count", aii.infoArrayCount); emit(LOG_DEBUG, "target.images.done", &a, NULL);
     return infos;
 }
 
@@ -188,6 +199,7 @@ int target_vm_read_crypt(task_t task,
                                    (unsigned long long)chunk, kr);
             return -1;
         }
+        if (log_level_visible(LOG_DEBUG)) { attrs_t a; attrs_init(&a); attrs_hex(&a, "address", (unsigned long long)src); attrs_uint(&a, "requested", chunk); attrs_uint(&a, "read", got); emit(LOG_DEBUG, "target.vm_read.chunk", &a, NULL); }
         src += got; dst += got; remaining -= got;
     }
     return 0;
@@ -212,12 +224,15 @@ int target_patch_bytes(task_t task, mach_vm_address_t addr,
     }
     mach_vm_address_t page = addr & ~(mach_vm_address_t)0x3fff;
     mach_vm_size_t span = ((addr + len - page + 0x3fff) & ~(mach_vm_size_t)0x3fff);
-    if (mach_vm_protect(task, page, span, FALSE,
-            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) return -1;
-    if (mach_vm_write(task, addr, (vm_offset_t)(uintptr_t)bytes,
-            (mach_msg_type_number_t)len) != KERN_SUCCESS) return -1;
-    mach_vm_protect(task, page, span, FALSE,
+    kern_return_t protect_kr = mach_vm_protect(task, page, span, FALSE,
+            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (protect_kr != KERN_SUCCESS) { attrs_t a; attrs_init(&a); attrs_str(&a, "tag", tag); attrs_int(&a, "kr", protect_kr); attrs_hex(&a, "addr", addr); emit(LOG_ERROR, "patch.protect_failed", &a, NULL); return -1; }
+    kern_return_t write_kr = mach_vm_write(task, addr, (vm_offset_t)(uintptr_t)bytes,
+            (mach_msg_type_number_t)len);
+    if (write_kr != KERN_SUCCESS) { attrs_t a; attrs_init(&a); attrs_str(&a, "tag", tag); attrs_int(&a, "kr", write_kr); attrs_hex(&a, "addr", addr); emit(LOG_ERROR, "patch.write_failed", &a, NULL); return -1; }
+    kern_return_t restore_kr = mach_vm_protect(task, page, span, FALSE,
         VM_PROT_READ | VM_PROT_EXECUTE);
+    if (restore_kr != KERN_SUCCESS) { attrs_t a; attrs_init(&a); attrs_str(&a, "tag", tag); attrs_int(&a, "kr", restore_kr); attrs_hex(&a, "addr", addr); emit(LOG_WARN, "patch.restore_protection_failed", &a, NULL); }
     attrs_t a; attrs_init(&a);
     attrs_str(&a, "tag", tag);
     attrs_hex(&a, "addr", (unsigned long long)addr);

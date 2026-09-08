@@ -1,4 +1,5 @@
 #include "args.h"
+#include "log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +62,10 @@ const char *args_parse(int argc, char **argv,
             exit(0);
         }
         if (parse_global(a, out_globals)) continue;
-        if (eq(a, "--operation-dir")) { if (++i >= argc) return NULL; out_decrypt->operation_dir = argv[i]; continue; }
+        if (eq(a, "--operation-dir")) {
+            if (++i >= argc) { attrs_t at; attrs_init(&at); attrs_str(&at, "option", "--operation-dir"); attrs_str(&at, "reason", "missing_value"); emit(LOG_ERROR, "args.failed", &at, "--operation-dir requires a value"); return NULL; }
+            out_decrypt->operation_dir = argv[i]; continue;
+        }
         if (eq(a, "--skip-appex")) { out_decrypt->skip_appex = 1; continue; }
         if (eq(a, "--execs-only")) { out_decrypt->execs_only = 1; continue; }
 
@@ -75,6 +79,7 @@ const char *args_parse(int argc, char **argv,
             // Implicit decrypt: positionals start here.
         }
         if (n_pos < 8) pos[n_pos++] = a;
+        else { attrs_t at; attrs_init(&at); attrs_str(&at, "reason", "too_many_arguments"); attrs_int(&at, "argc", argc); emit(LOG_ERROR, "args.failed", &at, "too many positional arguments"); return NULL; }
     }
 
     // With --execs-only, out-ipa is meaningless; allow 2 positionals.
@@ -83,6 +88,7 @@ const char *args_parse(int argc, char **argv,
     if (subcmd == NULL) {
         // Backward-compat: positionals → treat as `decrypt`.
         if (n_pos != min_pos && n_pos != 3) {
+            attrs_t at; attrs_init(&at); attrs_str(&at, "subcommand", "decrypt"); attrs_int(&at, "expected", min_pos); attrs_int(&at, "actual", n_pos); emit(LOG_ERROR, "args.failed", &at, "invalid decrypt argument count");
             args_usage(stderr, progname);
             return NULL;
         }
@@ -96,6 +102,7 @@ const char *args_parse(int argc, char **argv,
 
     if (eq(subcmd, "decrypt")) {
         if (n_pos != min_pos && n_pos != 3) {
+            attrs_t at; attrs_init(&at); attrs_str(&at, "subcommand", "decrypt"); attrs_int(&at, "expected", min_pos); attrs_int(&at, "actual", n_pos); emit(LOG_ERROR, "args.failed", &at, "invalid decrypt argument count");
             fprintf(stderr, "decrypt: expected %d positional args, got %d\n", min_pos, n_pos);
             args_usage(stderr, progname);
             return NULL;
@@ -106,6 +113,7 @@ const char *args_parse(int argc, char **argv,
         return "decrypt";
     }
 
+    attrs_t at; attrs_init(&at); attrs_str(&at, "subcommand", subcmd); attrs_str(&at, "reason", "unknown_subcommand"); emit(LOG_ERROR, "args.failed", &at, "unknown subcommand: %s", subcmd);
     fprintf(stderr, "unknown subcommand: %s\n", subcmd);
     args_usage(stderr, progname);
     return NULL;

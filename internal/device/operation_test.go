@@ -47,7 +47,7 @@ func TestNativeOperationProtocol(t *testing.T) {
 	prefix := filepath.Join(root, "ipadecrypt-op-")
 	binary := filepath.Join(root, "operation-test")
 
-	args := []string{"-std=c11", "-D_DEFAULT_SOURCE", "-DOPERATION_PREFIX=\"" + prefix + "\"", "../../helper/operation_test.c", "-o", binary}
+	args := []string{"-std=c11", "-D_DEFAULT_SOURCE", "-DOPERATION_PREFIX=\"" + prefix + "\"", "../../helper/operation_test.c", "../../helper/log.c", "-o", binary}
 	if runtime.GOOS == "linux" {
 		args = append(args, "-ldl")
 	}

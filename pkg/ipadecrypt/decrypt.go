@@ -442,7 +442,7 @@ func acquireFromAppStore(ctx context.Context, req Request, stateDir string, targ
 		return "", "", "", errors.New("apple account is required for App Store downloads")
 	}
 
-	as, err := appstore.New(filepath.Join(stateDir, "cookies"))
+	as, err := appstore.New(filepath.Join(stateDir, "cookies"), req.Apple.MACAddress)
 	if err != nil {
 		return "", "", "", fmt.Errorf("create App Store client: %w", err)
 	}
@@ -588,8 +588,21 @@ func loginWithAuthCode(ctx context.Context, client *appstore.Client, email, pass
 // Login authenticates an Apple account for later use with Decrypt. StateDir
 // holds the cookie jar; callers should protect it as secret material.
 func Login(ctx context.Context, stateDir, email, password string, provide AuthCodeProvider) (*AppleAccount, error) {
+	return LoginWithMACAddress(ctx, stateDir, email, password, "", provide)
+}
+
+// LoginWithMACAddress authenticates an Apple account using a fixed App Store
+// machine identity. macAddress must be a six-byte MAC address when set.
+func LoginWithMACAddress(ctx context.Context, stateDir, email, password, macAddress string, provide AuthCodeProvider) (*AppleAccount, error) {
 	if email == "" || password == "" {
 		return nil, errors.New("apple email and password are required")
+	}
+	if macAddress != "" {
+		var err error
+		macAddress, err = appstore.NormalizeMACAddress(macAddress)
+		if err != nil {
+			return nil, fmt.Errorf("invalid App Store MAC address: %w", err)
+		}
 	}
 
 	removeState := false
@@ -610,7 +623,7 @@ func Login(ctx context.Context, stateDir, email, password string, provide AuthCo
 		defer os.RemoveAll(stateDir)
 	}
 
-	client, err := appstore.New(filepath.Join(stateDir, "cookies"))
+	client, err := appstore.New(filepath.Join(stateDir, "cookies"), macAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -622,6 +635,7 @@ func Login(ctx context.Context, stateDir, email, password string, provide AuthCo
 
 	result := &AppleAccount{}
 	setAccount(result, account)
+	result.MACAddress = macAddress
 
 	return result, nil
 }

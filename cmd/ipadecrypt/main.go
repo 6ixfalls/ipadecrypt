@@ -16,8 +16,9 @@ var (
 	rootDirOverride string
 	redactSensitive bool
 
-	bootstrapReset     bool
-	bootstrapSkipLogin bool
+	bootstrapReset      bool
+	bootstrapSkipLogin  bool
+	bootstrapMACAddress string
 
 	decryptExtVerID       string
 	decryptOutput         string
@@ -57,6 +58,7 @@ func main() {
 	}
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
 	bootstrap.Flags().BoolVar(&bootstrapSkipLogin, "skip-login", false, "do not login to the App Store. ipadecrypt won't be able to use any App Store related features")
+	bootstrap.Flags().StringVar(&bootstrapMACAddress, "appstore-mac-address", "", "persist a fixed six-byte MAC address for the App Store identity")
 
 	decrypt := &cobra.Command{
 		Use:   "decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>",

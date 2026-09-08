@@ -78,7 +78,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+	as, err := appstore.New(filepath.Join(paths.Root, "cookies"), cfg.Apple.MACAddress)
 	if err != nil {
 		tui.Err("appstore client: %v", err)
 		return

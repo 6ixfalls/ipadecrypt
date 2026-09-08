@@ -20,7 +20,7 @@ func (c *Client) Purchase(acc *Account, app App) error {
 		return ErrPaidAppNotOwned
 	}
 
-	g, err := guid()
+	g, err := c.guid()
 	if err != nil {
 		return err
 	}

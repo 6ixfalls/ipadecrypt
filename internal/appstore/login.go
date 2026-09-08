@@ -29,7 +29,7 @@ type loginResult struct {
 // It fetches the bag to obtain the current SAP signing config, establishes a
 // machine-signing session, and signs the authenticate request body with it.
 func (c *Client) Login(email, password, authCode string) (*Account, error) {
-	mac, err := macAddress()
+	mac, err := c.macAddress()
 	if err != nil {
 		return nil, err
 	}

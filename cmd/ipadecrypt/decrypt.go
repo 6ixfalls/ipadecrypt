@@ -122,7 +122,7 @@ func publicAppleAccount(account config.Apple) lib.AppleAccount {
 	return lib.AppleAccount{
 		Email: account.Email, Password: account.Password, PasswordToken: account.PasswordToken,
 		DirectoryServicesID: account.DirectoryServicesIdentifier,
-		StoreFront:          account.StoreFront, Pod: account.Pod,
+		StoreFront:          account.StoreFront, Pod: account.Pod, MACAddress: account.MACAddress,
 	}
 }
 
@@ -130,7 +130,7 @@ func internalAppleAccount(account lib.AppleAccount) config.Apple {
 	return config.Apple{
 		Email: account.Email, Password: account.Password, PasswordToken: account.PasswordToken,
 		DirectoryServicesIdentifier: account.DirectoryServicesID,
-		StoreFront:                  account.StoreFront, Pod: account.Pod,
+		StoreFront:                  account.StoreFront, Pod: account.Pod, MACAddress: account.MACAddress,
 	}
 }
 

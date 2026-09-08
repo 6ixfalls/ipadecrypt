@@ -41,6 +41,7 @@ type Apple struct {
 	DirectoryServicesIdentifier string `json:"directoryServicesIdentifier,omitempty"`
 	StoreFront                  string `json:"storeFront,omitempty"`
 	Pod                         string `json:"pod,omitempty"`
+	MACAddress                  string `json:"macAddress,omitempty"`
 }
 
 func (a Apple) Account() *appstore.Account {

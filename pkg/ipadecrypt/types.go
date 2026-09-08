@@ -83,6 +83,10 @@ type AppleAccount struct {
 	DirectoryServicesID string
 	StoreFront          string
 	Pod                 string
+	// MACAddress optionally pins App Store authentication, purchase, and
+	// download requests to this six-byte MAC address. When empty, the host's
+	// network MAC address is used.
+	MACAddress string
 }
 
 // AuthCodeProvider returns a current App Store two-factor authentication code.
@@ -312,8 +316,9 @@ func internalAccount(a *AppleAccount) *appstore.Account {
 }
 
 func setAccount(dst *AppleAccount, src *appstore.Account) {
+	macAddress := dst.MACAddress
 	*dst = AppleAccount{Email: src.Email, Name: src.Name, Password: src.Password, PasswordToken: src.PasswordToken,
-		DirectoryServicesID: src.DirectoryServicesID, StoreFront: src.StoreFront, Pod: src.Pod}
+		DirectoryServicesID: src.DirectoryServicesID, StoreFront: src.StoreFront, Pod: src.Pod, MACAddress: macAddress}
 }
 
 func internalDevice(d DeviceConfig) config.Device {

@@ -40,6 +40,22 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	if cmd.Flags().Changed("appstore-mac-address") {
+		mac := ""
+		if strings.TrimSpace(bootstrapMACAddress) != "" {
+			mac, err = appstore.NormalizeMACAddress(bootstrapMACAddress)
+			if err != nil {
+				tui.Err("invalid --appstore-mac-address: %v", err)
+				return
+			}
+		}
+		cfg.Apple.MACAddress = mac
+		if err := cfg.Save(); err != nil {
+			tui.Err("save App Store MAC address: %v", err)
+			return
+		}
+	}
+
 	// ---- Step 1: App Store sign-in -----------------------------------
 
 	if bootstrapSkipLogin {
@@ -70,7 +86,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 			password = s
 		}
 
-		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+		as, err := appstore.New(filepath.Join(paths.Root, "cookies"), cfg.Apple.MACAddress)
 		if err != nil {
 			tui.Err("appstore client: %v", err)
 			return

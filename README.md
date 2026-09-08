@@ -107,6 +107,18 @@ always rejected.
 ipadecrypt bootstrap
 ```
 
+To keep the App Store identity stable across network-interface changes (or to
+reuse an existing identity), set a fixed six-byte MAC address during bootstrap:
+
+```sh
+ipadecrypt bootstrap --appstore-mac-address 02:00:00:00:00:01
+```
+
+The normalized address is saved as `apple.macAddress` in
+`~/.ipadecrypt/config.json` and is used consistently for App Store login,
+license purchases, and downloads. To go back to the host's detected MAC
+address, run `ipadecrypt bootstrap --appstore-mac-address ""`.
+
 A four-step interactive wizard:
 
 1. **App Store sign-in** - Logs into App Store. Credentials stay local in `~/.ipadecrypt/config.json`.

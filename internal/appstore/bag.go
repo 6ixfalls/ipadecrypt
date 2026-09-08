@@ -22,7 +22,7 @@ type bagResult struct {
 // the authenticate endpoint to sign against plus the setup/certificate endpoints
 // and version used to establish the machine-signing session during Login.
 func (c *Client) bag() (SAPConfig, error) {
-	g, err := guid()
+	g, err := c.guid()
 	if err != nil {
 		return SAPConfig{}, err
 	}

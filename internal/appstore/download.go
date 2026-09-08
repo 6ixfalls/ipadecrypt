@@ -141,7 +141,7 @@ func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string
 // (list versions, get per-version metadata). The endpoint is the same;
 // whether externalVersionID is set decides what is returned.
 func (c *Client) volumeDownload(acc *Account, app App, externalVersionID string) (downloadItem, error) {
-	g, err := guid()
+	g, err := c.guid()
 	if err != nil {
 		return downloadItem{}, err
 	}

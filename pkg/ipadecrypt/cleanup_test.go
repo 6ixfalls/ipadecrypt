@@ -140,8 +140,10 @@ func (f *fakeCleanupDevice) HashFile(p string) (string, error) {
 		if !ok {
 			return "", os.ErrNotExist
 		}
+
 		return hash, nil
 	}
+
 	if filepath.Base(p) == "Info.plist" {
 		if f.infoHash != "" {
 			return f.infoHash, nil
@@ -333,37 +335,46 @@ func TestCleanupRenamedExecutable(t *testing.T) {
 			r.ExpectedInfoHash = strings.Repeat("e", 64)
 			r.InstallIntent = mode != "before-install"
 			r.RemoveApp = r.InstallIntent
+
 			if err := j.save(); err != nil {
 				t.Fatal(err)
 			}
+
 			dir := j.root.Name()
 			j.close()
-			var err error
-			j, err = openJournal("job-1", dir, false)
+
+			j, err := openJournal("job-1", dir, false)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			defer j.close()
+
 			r = &j.record
 			if r.PreviousExecName != "OldExec" {
 				t.Fatal("previous executable not persisted")
 			}
+
 			f := &fakeCleanupDevice{path: testBundle, hashes: map[string]string{
 				filepath.Join(testBundle, "OldExec"):    r.PreviousHash,
 				filepath.Join(testBundle, "Info.plist"): r.PreviousInfoHash,
 			}}
+
 			if mode == "installed" {
 				delete(f.hashes, filepath.Join(testBundle, "OldExec"))
 				f.hashes[filepath.Join(testBundle, "NewExec")] = r.ExpectedHash
 				f.hashes[filepath.Join(testBundle, "Info.plist")] = r.ExpectedInfoHash
 			}
+
 			if mode == "foreign" {
 				f.hashes[filepath.Join(testBundle, "OldExec")] = strings.Repeat("f", 64)
 			}
+
 			err = cleanupOperation(f, j)
 			if (err != nil) != (mode == "foreign") {
 				t.Fatalf("cleanup: %v", err)
 			}
+
 			if f.uninstalled != (mode == "installed") {
 				t.Fatalf("uninstalled = %v", f.uninstalled)
 			}
@@ -379,8 +390,11 @@ func TestJournalPreviousExecutableValidation(t *testing.T) {
 			t.Fatalf("accepted %q", name)
 		}
 	}
+
 	j.record.PreviousExecName = ""
+
 	j.record.ExecName = "LegacyExec"
+
 	if got := j.record.previousExecutable(); got != "LegacyExec" {
 		t.Fatal(got)
 	}

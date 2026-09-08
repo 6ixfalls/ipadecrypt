@@ -220,6 +220,7 @@ func (r operationRecord) previousExecutable() string {
 	if r.PreviousExecName != "" {
 		return r.PreviousExecName
 	}
+
 	return r.ExecName
 }
 
@@ -399,16 +400,19 @@ func cleanupOperation(dev cleanupDevice, j *operationJournal) error {
 					infoHash, e := dev.HashFile(path.Join(current, "Info.plist"))
 					appErr = e
 					owned, unchanged := false, false
+
 					if e == nil && infoHash == r.ExpectedInfoHash {
 						hash, hashErr := dev.HashFile(path.Join(current, r.ExecName))
 						appErr = hashErr
 						owned = hashErr == nil && hash == r.ExpectedHash && (r.PreviousPath == "" || hash != r.PreviousHash || infoHash != r.PreviousInfoHash || (r.InstalledPath != "" && current == r.InstalledPath))
 					}
+
 					if !owned && e == nil && current == r.PreviousPath && infoHash == r.PreviousInfoHash && (r.ExpectedHash != r.PreviousHash || r.ExpectedInfoHash != r.PreviousInfoHash) && r.InstalledPath == "" {
 						hash, hashErr := dev.HashFile(path.Join(current, r.previousExecutable()))
 						appErr = errors.Join(appErr, hashErr)
 						unchanged = hashErr == nil && hash == r.PreviousHash
 					}
+
 					if !owned && !unchanged {
 						appErr = errors.Join(appErr, errors.New("installed build ownership uncertain"))
 					}

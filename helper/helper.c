@@ -3,6 +3,7 @@
 #include "fs.h"
 #include "log.h"
 #include "operation.h"
+#include "process.h"
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -158,11 +159,19 @@ static int run_decrypt(const decrypt_args_t *a) {
         return 1;
     }
 
-    if (a->bundle_id && a->bundle_id[0]) {
-        decrypt_bundle(a->bundle_src, bundle_dst, a->bundle_id);
-    }
+    int decrypt_failed = 0;
+    if (a->bundle_id && a->bundle_id[0] &&
+        decrypt_bundle(a->bundle_src, bundle_dst, a->bundle_id) != 0)
+        decrypt_failed = 1;
     if (!a->skip_appex) {
-        decrypt_appexes(a->bundle_src, bundle_dst);
+        if (decrypt_appexes(a->bundle_src, bundle_dst) != 0)
+            decrypt_failed = 1;
+    }
+    if (decrypt_failed) {
+        emit(LOG_ERROR, "decrypt.bundle_failed", NULL,
+             "one or more bundle targets failed");
+        fs_rm_rf(staging);
+        return 1;
     }
 
     if (a->execs_only) {
@@ -176,7 +185,7 @@ static int run_decrypt(const decrypt_args_t *a) {
             return 1;
         }
 
-        emit(LOG_INFO, "done", NULL, "done");
+        if (!a->operation_dir) emit(LOG_INFO, "done", NULL, "done");
         return 0;
     }
 
@@ -204,41 +213,9 @@ static int run_decrypt(const decrypt_args_t *a) {
     {
         attrs_t at; attrs_init(&at);
         attrs_str(&at, "ipa", a->out_ipa);
-        emit(LOG_INFO, "done", &at, "done");
+        if (!a->operation_dir) emit(LOG_INFO, "done", &at, "done");
     }
     return 0;
-}
-
-// Confirm that no executable in the target bundle is still running before
-// issuing a completion receipt. Failure to enumerate is uncertainty, not idle.
-extern int proc_listpids(uint32_t, uint32_t, void *, int);
-extern int proc_pidpath(int, void *, uint32_t);
-static int bundle_processes_idle(const char *bundle) {
-    int needed = proc_listpids(1,0,NULL,0);
-    if (needed <= 0 || needed > 16 * 1024 * 1024) {
-        attrs_t a; attrs_init(&a); attrs_int(&a, "bytes", needed); attrs_int(&a, "err", errno);
-        emit(LOG_ERROR, "operation.process_list_failed", &a, "could not size process list"); return 0;
-    }
-    int capacity = needed + 4096;
-    pid_t *pids = malloc((size_t)capacity);
-    if (!pids) { emit(LOG_ERROR, "operation.process_list_oom", NULL, "could not allocate process list"); return 0; }
-    int bytes = proc_listpids(1,0,pids,capacity);
-    if (bytes <= 0 || bytes >= capacity) { attrs_t a; attrs_init(&a); attrs_int(&a, "bytes", bytes); attrs_int(&a, "capacity", capacity); emit(LOG_ERROR, "operation.process_list_incomplete", &a, NULL); free(pids); return 0; }
-    if (strncmp(bundle,"/private/",9) == 0) bundle += 8;
-    size_t n = strlen(bundle);
-    int idle = 1;
-    for (int i = 0; i < bytes / (int)sizeof(pid_t); ++i) {
-        if (pids[i] <= 0 || pids[i] == getpid()) continue;
-        char path[4096];
-        if (proc_pidpath(pids[i],path,sizeof(path)) <= 0) {
-            if (kill(pids[i],0) == 0 || errno != ESRCH) { attrs_t a; attrs_init(&a); attrs_int(&a, "pid", pids[i]); emit(LOG_WARN, "operation.process_unknown", &a, "live process path could not be inspected"); idle = 0; break; }
-            continue;
-        }
-        const char *p = path;
-        if (strncmp(p,"/private/",9) == 0) p += 8;
-        if (strncmp(p,bundle,n) == 0 && p[n] == '/') { attrs_t a; attrs_init(&a); attrs_int(&a, "pid", pids[i]); attrs_str(&a, "path", p); emit(LOG_WARN, "operation.process_busy", &a, "bundle process is still running"); idle = 0; break; }
-    }
-    free(pids); return idle;
 }
 
 int main(int argc, char **argv) {
@@ -318,17 +295,21 @@ int main(int argc, char **argv) {
             close(lock); close(d); return 1;
         }
         int rc = run_decrypt(&da);
-        if (!bundle_processes_idle(da.bundle_src)) {
+        if (!process_completion_confirmed(da.bundle_src, 1000)) {
             emit(LOG_ERROR, "operation.target_busy", NULL,
-                 "target processes did not become idle");
+                 "target process completion was not confirmed");
             rc = 1;
         } else if (receipt(d,"helper.done")) {
             emit(LOG_ERROR, "operation.receipt_failed", NULL,
                  "could not persist the helper completion receipt");
             rc = 1;
         }
-        if (rc) emit(LOG_ERROR, "decrypt.failed", NULL,
-                     "helper decryption failed");
+        if (rc) {
+            emit(LOG_ERROR, "decrypt.failed", NULL,
+                 "helper decryption failed");
+        } else {
+            emit(LOG_INFO, "done", NULL, "done");
+        }
         close(lock); close(d); return rc;
     }
 

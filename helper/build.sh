@@ -63,6 +63,7 @@ docker run --rm \
             helper/inject.c \
             helper/log.c \
             helper/macho.c \
+            helper/process.c \
             helper/spawn.c \
             helper/target.c
         ldid -S"helper/entitlements.plist" helper/dist/ipadecrypt-helper-arm64

@@ -72,6 +72,10 @@ iOS; cleanup does not scan or wipe those shared resources.
 
 The helper holds an OS lock for each operation and syncs completion receipts.
 Cleanup acquires that lock and seals the directory against delayed launches.
+Before writing `helper.done`, the helper positively reaps every ptrace-owned
+child and allows one second for transient process-table entries to settle. A
+persistent bundle process, uninspectable live process, or failed child reap
+remains unconfirmed.
 A busy lock or missing completion receipt is **unconfirmed**: this implementation
 does not kill a process by a saved PID or guess whether an abruptly terminated
 helper left targets/system installation work behind. A disconnected helper that
@@ -112,7 +116,8 @@ Run `go test ./...`, `go test -race ./pkg/ipadecrypt ./internal/device`,
 `golangci-lint run`, and `go build ./...`. The device package compiles and runs
 `helper/operation_test.c` when a POSIX C compiler is present; it checks lock
 exclusion, missing receipts, permanent sealing, retry and symlink rejection without
-an iPhone. Journal/cleanup tests cover replay, invalid ownership, cancelled contexts,
+an iPhone. It also runs `helper/process_test.c` for transient and persistent
+process states plus owned-child reap failures. Journal/cleanup tests cover replay, invalid ownership, cancelled contexts,
 independent errors, lost responses, preservation, and failed persistence.
 
 Rebuild with `./helper/build.sh`, copy its output into

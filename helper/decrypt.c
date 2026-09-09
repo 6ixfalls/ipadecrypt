@@ -6,6 +6,7 @@
 #include "inject.h"
 #include "log.h"
 #include "macho.h"
+#include "process.h"
 #include "spawn.h"
 #include "target.h"
 
@@ -30,6 +31,24 @@ extern int ptrace(int, pid_t, void *, int);
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
+
+// Terminate a target and positively confirm that an owned ptrace child was
+// reaped. The durable helper must not report bundle completion when waitpid
+// failed, because that would make the later helper.done receipt ambiguous.
+static int terminate_target(pid_t pid, task_t task, int via_ptrace) {
+    if (via_ptrace) ptrace(PT_KILL, pid, 0, 0);
+    task_terminate(task);
+    kill(pid, SIGKILL);
+
+    if (via_ptrace && reap_owned_process(pid) != 0) return -1;
+
+    attrs_t attrs;
+    attrs_init(&attrs);
+    attrs_int(&attrs, "pid", pid);
+    attrs_str(&attrs, "method", via_ptrace ? "ptrace" : "sbs");
+    emit(LOG_DEBUG, "target.terminated", &attrs, NULL);
+    return 0;
+}
 
 int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
                    const char *bundle_id) {
@@ -63,7 +82,7 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
         attrs_str(&a, "src", bundle_src);
         emit(LOG_ERROR, "bundle.spawn_failed", &a,
              "spawn failed for %s", bundle_src);
-        return 0;
+        return 1;
     }
 
     // 1) Dump the main exec from the freshly-suspended target.
@@ -110,15 +129,15 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     // is what we got from the PT_ATTACHEXC stop  resuming via
     // PT_CONTINUE would just race AMFI's runtime kill.
     if (via_ptrace) {
-        ptrace(PT_KILL, pid, 0, 0);
-        task_terminate(task);
-        kill(pid, SIGKILL);
-        int reaped;
-        pid_t rw;
-        do { rw = waitpid(pid, &reaped, 0); } while (rw < 0 && errno == EINTR);
+        int terminated = terminate_target(pid, task, 1);
         attrs_t a; attrs_init(&a);
         attrs_str(&a, "src", bundle_src);
         attrs_int(&a, "extras", 0);
+        if (terminated != 0) {
+            emit(LOG_ERROR, "bundle.terminate_failed", &a,
+                 "bundle target termination was not confirmed");
+            return 1;
+        }
         emit(LOG_INFO, "bundle.done", &a,
              "bundle done: main only (ptrace, no framework enumeration)");
         return 0;
@@ -247,11 +266,14 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     free(paths); free(imgs);
 
     mach_port_mod_refs(mach_task_self(), exc, MACH_PORT_RIGHT_RECEIVE, -1);
-    task_terminate(task);
-    kill(pid, SIGKILL);
-    int reaped;
-    pid_t rw;
-    do { rw = waitpid(pid, &reaped, 0); } while (rw < 0 && errno == EINTR);
+    if (terminate_target(pid, task, 0) != 0) {
+        attrs_t failed;
+        attrs_init(&failed);
+        attrs_str(&failed, "src", bundle_src);
+        emit(LOG_ERROR, "bundle.terminate_failed", &failed,
+             "bundle target termination was not confirmed");
+        return 1;
+    }
 
     attrs_t a; attrs_init(&a);
     attrs_str(&a, "src", bundle_src);
@@ -261,9 +283,10 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     return 0;
 }
 
-void decrypt_appexes(const char *bundle_src, const char *bundle_dst) {
+int decrypt_appexes(const char *bundle_src, const char *bundle_dst) {
     attrs_t pass; attrs_init(&pass); attrs_str(&pass, "src", bundle_src); emit(LOG_DEBUG, "appex.scan.begin", &pass, NULL);
     int found = 0;
+    int failed = 0;
     const char *subdirs[] = { "PlugIns", "Extensions", NULL };
     for (int si = 0; subdirs[si]; si++) {
         char dir_src[4096], dir_dst[4096];
@@ -280,11 +303,12 @@ void decrypt_appexes(const char *bundle_src, const char *bundle_dst) {
             snprintf(s, sizeof(s), "%s/%s", dir_src, e->d_name);
             snprintf(t, sizeof(t), "%s/%s", dir_dst, e->d_name);
             found++;
-            decrypt_bundle(s, t, NULL);
+            if (decrypt_bundle(s, t, NULL) != 0) failed = 1;
         }
         closedir(d);
     }
-    attrs_int(&pass, "found", found); emit(LOG_DEBUG, "appex.scan.done", &pass, NULL);
+    attrs_int(&pass, "found", found); attrs_int(&pass, "result", failed); emit(failed ? LOG_ERROR : LOG_DEBUG, "appex.scan.done", &pass, failed ? "one or more extensions failed" : NULL);
+    return failed;
 }
 
 // ----- in-process zip writer (replaces the external `zip` binary) -----------

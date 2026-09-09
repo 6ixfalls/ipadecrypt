@@ -9,7 +9,7 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
 
 // Walk PlugIns/ and Extensions/ at the top of main_app and decrypt each
 // .appex bundle via the ptrace path.
-void decrypt_appexes(const char *bundle_src, const char *bundle_dst);
+int decrypt_appexes(const char *bundle_src, const char *bundle_dst);
 
 // Zip the staging tree's Payload/ into out_ipa ("-" streams to stdout).
 int run_zip(const char *staging, const char *ipa_path);

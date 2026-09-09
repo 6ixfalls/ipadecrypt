@@ -60,3 +60,30 @@ func TestNativeOperationProtocol(t *testing.T) {
 		t.Fatalf("helper protocol: %v\n%s", e, out)
 	}
 }
+
+func TestNativeProcessCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper process check")
+	}
+
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("C compiler unavailable")
+	}
+
+	root := t.TempDir()
+	binary := filepath.Join(root, "process-test")
+
+	args := []string{"-std=c11", "-D_DEFAULT_SOURCE", "../../helper/process_test.c", "../../helper/log.c", "-o", binary}
+	if runtime.GOOS == "linux" {
+		args = append(args, "-ldl")
+	}
+
+	if out, e := exec.Command(cc, args...).CombinedOutput(); e != nil {
+		t.Fatalf("compile helper process check: %v\n%s", e, out)
+	}
+
+	if out, e := exec.Command(binary).CombinedOutput(); e != nil {
+		t.Fatalf("helper process check: %v\n%s", e, out)
+	}
+}

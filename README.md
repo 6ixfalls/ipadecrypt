@@ -185,9 +185,12 @@ With RemoteCompanion installed, set `device.unlockPIN` in the CLI JSON
 configuration, or `DeviceConfig.UnlockPIN` when using the Go API. Keep the PIN
 as a string to preserve leading zeros. The SSH password is separate.
 
-Immediately before decryption, ipadecrypt checks the screen lock state and runs
-`rc-client unlock <pin>` only if locked. It attempts the supplied PIN once and verifies
-the device unlocked before proceeding. Missing RemoteCompanion, an unknown lock
-state, or an unsuccessful unlock returns `ErrDeviceLocked`. Without a PIN,
+Immediately before the on-device helper starts, ipadecrypt checks the screen lock
+state and runs `rc-client unlock <pin>` only if locked. It attempts the supplied PIN
+once and verifies the device unlocked before proceeding. It then temporarily
+disables SpringBoard's idle timer for the rest of decryption and restores its exact
+prior state afterward, including when decryption fails. The user's saved Auto-Lock
+timeout is never rewritten. Missing RemoteCompanion, an unknown lock state, or an
+unsuccessful unlock or idle-timer change returns `ErrDeviceLocked`. Without a PIN,
 unlock the device manually as before. The PIN is not written to operation journals
 or included in events or errors. RemoteCompanion requires it as a process argument.

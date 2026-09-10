@@ -854,12 +854,6 @@ func uploadAndInstall(dev *device.Client, plan installPlan, uploadPath string, r
 }
 
 func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath, bundleID, bundlePath, version, sourceIPA string, result *Result) (returnErr error) {
-	if req.Device.UnlockPIN != "" {
-		if err := ensureUnlocked(dev, helperPath, req.Device.UnlockPIN); err != nil {
-			return err
-		}
-	}
-
 	outputPath, err := resolveOutputPath(req.OutputPath, bundleID, version)
 	if err != nil {
 		return err
@@ -895,8 +889,6 @@ func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath
 		}
 	}
 
-	emit(Event{Phase: PhaseDecrypting, Action: "helper.start", Message: "starting on-device helper"})
-
 	var helperFailure error
 	onHelperEvent := func(event device.Event) {
 		if helperFailure == nil {
@@ -913,11 +905,39 @@ func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath
 	written := &countingWriter{w: output, onProgress: func(current int64) {
 		emit(Event{Phase: PhaseAssembling, Action: "write.progress", Message: "writing decrypted IPA", Current: current})
 	}}
+	var restoreAutoLock func() error
+	defer func() {
+		if restoreAutoLock != nil {
+			returnErr = errors.Join(returnErr, restoreAutoLock())
+		}
+	}()
+	startHelper := func() error {
+		if req.Device.UnlockPIN != "" {
+			if err := ensureUnlocked(dev, helperPath, req.Device.UnlockPIN); err != nil {
+				return err
+			}
+
+			var err error
+			restoreAutoLock, err = disableAutoLock(dev)
+			if err != nil {
+				return err
+			}
+		}
+
+		emit(Event{Phase: PhaseDecrypting, Action: "helper.start", Message: "starting on-device helper"})
+		return nil
+	}
 
 	if sourceIPA != "" {
 		emit(Event{Phase: PhaseAssembling, Action: "assemble", Message: "assembling decrypted IPA"})
 
 		err = pipeline.Assemble(sourceIPA, written, func(write pipeline.SubstituteWriter) error {
+			// Assemble may spend enough time reading the source IPA for the
+			// device to auto-lock. Unlock only when the helper is ready to run.
+			if err := startHelper(); err != nil {
+				return err
+			}
+
 			code, runErr := dev.RunHelperExecs(helperPath, bundleID, bundlePath, req.Verbose, req.SkipAppex, onHelperEvent,
 				func(name string, _ int64, reader io.Reader) error { return write(name, reader) })
 			if runErr != nil {
@@ -935,6 +955,10 @@ func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath
 			return nil
 		})
 	} else {
+		if err := startHelper(); err != nil {
+			return err
+		}
+
 		code, runErr := dev.RunHelper(helperPath, bundleID, bundlePath, req.Verbose, req.SkipAppex, onHelperEvent, written)
 		if runErr != nil {
 			err = runErr

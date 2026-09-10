@@ -56,3 +56,88 @@ func TestEnsureUnlocked(t *testing.T) {
 		})
 	}
 }
+
+type autoLockFake struct {
+	disabled   bool
+	queryValid bool
+	failSets   int
+	sets       []bool
+}
+
+func (f *autoLockFake) Run(cmd string) (string, string, int, error) {
+	if strings.Contains(cmd, "isIdleTimerDisabled") {
+		if !f.queryValid {
+			return "Lua Error: unknown", "", 0, nil
+		}
+		if f.disabled {
+			return "Lua Error: IPADECRYPT_IDLE_TIMER_DISABLED", "", 0, nil
+		}
+		return "Lua Error: IPADECRYPT_IDLE_TIMER_ENABLED", "", 0, nil
+	}
+
+	if strings.Contains(cmd, "setIdleTimerDisabled:") {
+		if f.failSets > 0 {
+			f.failSets--
+			return "Lua Error: failed", "", 0, nil
+		}
+		value := strings.Contains(cmd, ",true)")
+		f.disabled = value
+		f.sets = append(f.sets, value)
+		return "Lua Error: IPADECRYPT_IDLE_TIMER_SET", "", 0, nil
+	}
+
+	return "", "", 1, errors.New("unexpected command")
+}
+
+func (f *autoLockFake) RunSudo(string) (string, string, int, error) {
+	return "", "", 1, errors.New("unexpected sudo command")
+}
+
+func TestDisableAutoLockRestoresPriorState(t *testing.T) {
+	f := &autoLockFake{queryValid: true}
+	restore, err := disableAutoLock(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.disabled || len(f.sets) != 1 || !f.sets[0] {
+		t.Fatalf("auto-lock was not disabled: %#v", f.sets)
+	}
+
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
+	if f.disabled || len(f.sets) != 2 || f.sets[1] {
+		t.Fatalf("auto-lock was not restored: %#v", f.sets)
+	}
+}
+
+func TestDisableAutoLockPreservesExistingOverride(t *testing.T) {
+	f := &autoLockFake{disabled: true, queryValid: true}
+	restore, err := disableAutoLock(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
+	if !f.disabled || len(f.sets) != 0 {
+		t.Fatalf("existing idle-timer override changed: %#v", f.sets)
+	}
+}
+
+func TestDisableAutoLockFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fake autoLockFake
+	}{
+		{name: "unknown prior state", fake: autoLockFake{}},
+		{name: "disable failure", fake: autoLockFake{queryValid: true, failSets: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := disableAutoLock(&tc.fake)
+			if !errors.Is(err, ErrDeviceLocked) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}

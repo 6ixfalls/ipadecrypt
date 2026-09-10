@@ -16,7 +16,7 @@
 #define MIN_LEASE_TTL 15
 #define MAX_LEASE_TTL 300
 
-static NSString *const IdleReason = @"com.londek.ipadecrypt";
+static NSString *const IdleReason = @"me.sixfalls.ipadecrypt";
 
 @interface UIApplication (IPADDecryptPrivate)
 - (void)_setIdleTimerDisabled:(BOOL)disabled forReason:(NSString *)reason;

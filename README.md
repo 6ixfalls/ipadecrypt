@@ -186,7 +186,7 @@ configuration, or `DeviceConfig.UnlockPIN` when using the Go API. Keep the PIN
 as a string to preserve leading zeros. The SSH password is separate.
 
 Immediately before decryption, ipadecrypt checks the screen lock state and runs
-`rc unlock <pin>` only if locked. It attempts the supplied PIN once and verifies
+`rc-client unlock <pin>` only if locked. It attempts the supplied PIN once and verifies
 the device unlocked before proceeding. Missing RemoteCompanion, an unknown lock
 state, or an unsuccessful unlock returns `ErrDeviceLocked`. Without a PIN,
 unlock the device manually as before. The PIN is not written to operation journals

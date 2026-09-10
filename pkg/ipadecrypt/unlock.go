@@ -15,7 +15,7 @@ func unlockQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// Attempt the supplied PIN only once. Never expose command output: rc may
+// Attempt the supplied PIN only once. Never expose command output: rc-client may
 // echo its arguments, and transport errors may contain the command itself.
 func ensureUnlocked(dev unlockDevice, helperPath, pin string) error {
 	locked := func() (bool, error) {
@@ -32,7 +32,7 @@ func ensureUnlocked(dev unlockDevice, helperPath, pin string) error {
 		return err
 	}
 
-	_, _, code, err := dev.Run("PATH=/var/jb/usr/bin:/usr/bin:/bin:$PATH rc unlock " + unlockQuote(pin))
+	_, _, code, err := dev.Run("PATH=/var/jb/usr/bin:/usr/bin:/bin:$PATH rc-client unlock " + unlockQuote(pin))
 	if err != nil || code != 0 {
 		return fmt.Errorf("%w: RemoteCompanion unlock failed; check the tweak and configured PIN", ErrDeviceLocked)
 	}

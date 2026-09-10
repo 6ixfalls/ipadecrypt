@@ -9,35 +9,46 @@ import (
 type unlockFake struct {
 	state   string
 	command string
+	input   string
 	failure bool
 	checks  int
 }
 
 func (f *unlockFake) Run(cmd string) (string, string, int, error) {
+	if strings.HasSuffix(cmd, "ipadc status") {
+		f.checks++
+		if f.state != "locked" && f.state != "unlocked" {
+			return f.state, "", 0, nil
+		}
+		return f.state, "", 0, nil
+	}
+
+	return "", "", 1, errors.New("unexpected command")
+}
+
+func (f *unlockFake) RunInput(cmd string, input []byte) (string, string, int, error) {
 	f.command = cmd
+	f.input = string(input)
 	if f.failure {
 		return "secret", "secret", 1, errors.New("secret")
 	}
-	f.state = "0"
-	return "", "", 0, nil
+	f.state = "unlocked"
+	return "unlocked", "", 0, nil
 }
-func (f *unlockFake) RunSudo(string) (string, string, int, error) {
-	f.checks++
-	return f.state, "", 0, nil
-}
+
 func TestEnsureUnlocked(t *testing.T) {
 	for _, tc := range []struct {
 		name, state                  string
 		fail, wantCommand, wantError bool
 	}{
-		{"already unlocked", "0", false, false, false},
-		{"locked", "1", false, true, false},
-		{"unknown", "-1", false, false, true},
-		{"unlock failure", "1", true, true, true},
+		{"already unlocked", "unlocked", false, false, false},
+		{"locked", "locked", false, true, false},
+		{"unknown", "unknown", false, false, true},
+		{"unlock failure", "locked", true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &unlockFake{state: tc.state, failure: tc.fail}
-			err := ensureUnlocked(f, "/tmp/helper", "secret'$(touch /tmp/unwanted)")
+			err := ensureUnlocked(f, "secret'$(touch /tmp/unwanted)")
 			if (err != nil) != tc.wantError {
 				t.Fatalf("error: %v", err)
 			}
@@ -47,8 +58,9 @@ func TestEnsureUnlocked(t *testing.T) {
 			if err != nil && (!errors.Is(err, ErrDeviceLocked) || strings.Contains(err.Error(), "secret")) {
 				t.Fatalf("unsafe error: %v", err)
 			}
-			if tc.wantCommand && !strings.Contains(f.command, unlockQuote("secret'$(touch /tmp/unwanted)")) {
-				t.Fatal("PIN not quoted")
+			if tc.wantCommand && (strings.Contains(f.command, "secret") ||
+				f.input != "secret'$(touch /tmp/unwanted)\n") {
+				t.Fatal("PIN was not isolated on stdin")
 			}
 			if tc.name == "locked" && f.checks != 2 {
 				t.Fatal("unlock not verified")
@@ -57,62 +69,28 @@ func TestEnsureUnlocked(t *testing.T) {
 	}
 }
 
-type autoLockFake struct {
-	disabled   bool
-	queryValid bool
-	failSets   int
-	sets       []bool
+type idleLeaseFake struct {
+	commands []string
+	fail     bool
 }
 
-func (f *autoLockFake) Run(cmd string) (string, string, int, error) {
-	if strings.Contains(cmd, "isIdleTimerDisabled") {
-		if !f.queryValid {
-			return "Lua Error: unknown", "", 0, nil
-		}
-		if f.disabled {
-			return "Lua Error: IPADECRYPT_IDLE_TIMER_DISABLED", "", 0, nil
-		}
-		return "Lua Error: IPADECRYPT_IDLE_TIMER_ENABLED", "", 0, nil
+func (f *idleLeaseFake) Run(cmd string) (string, string, int, error) {
+	f.commands = append(f.commands, cmd)
+	if f.fail {
+		return "", "", 1, errors.New("failed")
 	}
-
-	if strings.Contains(cmd, "setIdleTimerDisabled:") {
-		if f.failSets > 0 {
-			f.failSets--
-			return "Lua Error: failed", "", 0, nil
-		}
-		value := strings.Contains(cmd, ",true)")
-		f.disabled = value
-		f.sets = append(f.sets, value)
-		return "Lua Error: IPADECRYPT_IDLE_TIMER_SET", "", 0, nil
+	if strings.Contains(cmd, "idle-acquire") {
+		return "01234567-89ab-cdef-0123-456789abcdef\n", "", 0, nil
 	}
-
-	return "", "", 1, errors.New("unexpected command")
+	return "released\n", "", 0, nil
 }
 
-func (f *autoLockFake) RunSudo(string) (string, string, int, error) {
-	return "", "", 1, errors.New("unexpected sudo command")
+func (f *idleLeaseFake) RunInput(string, []byte) (string, string, int, error) {
+	return "", "", 1, errors.New("unexpected input command")
 }
 
-func TestDisableAutoLockRestoresPriorState(t *testing.T) {
-	f := &autoLockFake{queryValid: true}
-	restore, err := disableAutoLock(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !f.disabled || len(f.sets) != 1 || !f.sets[0] {
-		t.Fatalf("auto-lock was not disabled: %#v", f.sets)
-	}
-
-	if err := restore(); err != nil {
-		t.Fatal(err)
-	}
-	if f.disabled || len(f.sets) != 2 || f.sets[1] {
-		t.Fatalf("auto-lock was not restored: %#v", f.sets)
-	}
-}
-
-func TestDisableAutoLockPreservesExistingOverride(t *testing.T) {
-	f := &autoLockFake{disabled: true, queryValid: true}
+func TestDisableAutoLockAcquiresAndReleasesLease(t *testing.T) {
+	f := &idleLeaseFake{}
 	restore, err := disableAutoLock(f)
 	if err != nil {
 		t.Fatal(err)
@@ -120,24 +98,36 @@ func TestDisableAutoLockPreservesExistingOverride(t *testing.T) {
 	if err := restore(); err != nil {
 		t.Fatal(err)
 	}
-	if !f.disabled || len(f.sets) != 0 {
-		t.Fatalf("existing idle-timer override changed: %#v", f.sets)
+	if len(f.commands) != 2 || !strings.Contains(f.commands[0], "idle-acquire 60") ||
+		!strings.Contains(f.commands[1], "idle-release 01234567-89ab-cdef-0123-456789abcdef") {
+		t.Fatalf("commands = %#v", f.commands)
+	}
+	if err := restore(); err != nil || len(f.commands) != 2 {
+		t.Fatalf("second restore = %v, commands = %#v", err, f.commands)
 	}
 }
 
-func TestDisableAutoLockFailsClosed(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		fake autoLockFake
-	}{
-		{name: "unknown prior state", fake: autoLockFake{}},
-		{name: "disable failure", fake: autoLockFake{queryValid: true, failSets: 1}},
+func TestDisableAutoLockRejectsBadLease(t *testing.T) {
+	for _, failure := range []bool{
+		true,
+		false,
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := disableAutoLock(&tc.fake)
-			if !errors.Is(err, ErrDeviceLocked) {
-				t.Fatalf("error = %v", err)
-			}
-		})
+		_, err := disableAutoLock(&badLeaseFake{failure: failure})
+		if !errors.Is(err, ErrDeviceLocked) {
+			t.Fatalf("error = %v", err)
+		}
 	}
+}
+
+type badLeaseFake struct{ failure bool }
+
+func (f *badLeaseFake) Run(string) (string, string, int, error) {
+	if f.failure {
+		return "", "", 1, errors.New("failed")
+	}
+	return "not-a-token", "", 0, nil
+}
+
+func (f *badLeaseFake) RunInput(string, []byte) (string, string, int, error) {
+	return "", "", 1, errors.New("unexpected input command")
 }

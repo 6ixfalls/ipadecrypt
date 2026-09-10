@@ -105,7 +105,7 @@ type DeviceAuth struct {
 // AcceptNewHostKey are forwarded to the SSH transport. Callers should use a
 // dedicated known-hosts file and review newly enrolled keys out of band.
 type DeviceConfig struct {
-	// UnlockPIN optionally unlocks a locked device using RemoteCompanion.
+	// UnlockPIN optionally unlocks a locked device using ipadecrypt Companion.
 	UnlockPIN        string
 	Host             string
 	Port             int

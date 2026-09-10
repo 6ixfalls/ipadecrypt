@@ -1,0 +1,9 @@
+Package: me.sixfalls.ipadecrypt
+Name: ipadecrypt Companion
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: Minimal SpringBoard companion for ipadecrypt lock and idle-timer control.
+Maintainer: Bryan Lee
+Author: Bryan Lee
+Section: Tweaks
+Depends: mobilesubstrate

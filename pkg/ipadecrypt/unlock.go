@@ -4,30 +4,31 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
-const remoteCompanionPath = "PATH=/var/jb/usr/bin:/usr/bin:/bin:$PATH rc-client "
+const (
+	companionPath       = "PATH=/var/jb/usr/bin:/usr/bin:/bin:$PATH ipadc "
+	idleLeaseTTL        = 60 * time.Second
+	idleLeaseRenewEvery = 20 * time.Second
+)
 
 type unlockDevice interface {
 	Run(string) (string, string, int, error)
-	RunSudo(string) (string, string, int, error)
+	RunInput(string, []byte) (string, string, int, error)
 }
 
-func unlockQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// Attempt the supplied PIN only once. Never expose command output: rc-client may
-// echo its arguments, and transport errors may contain the command itself.
-func ensureUnlocked(dev unlockDevice, helperPath, pin string) error {
+// Attempt the supplied PIN only once. Never expose command output: transport
+// errors may contain the command and therefore the PIN.
+func ensureUnlocked(dev unlockDevice, pin string) error {
 	locked := func() (bool, error) {
-		out, _, code, err := dev.RunSudo(unlockQuote(helperPath) + " lock-status")
-		if err != nil || code != 0 || (strings.TrimSpace(out) != "0" && strings.TrimSpace(out) != "1") {
+		out, _, code, err := dev.Run(companionPath + "status")
+		if err != nil || code != 0 || (strings.TrimSpace(out) != "locked" && strings.TrimSpace(out) != "unlocked") {
 			return false, fmt.Errorf("%w: cannot determine device lock state", ErrDeviceLocked)
 		}
 
-		return strings.TrimSpace(out) == "1", nil
+		return strings.TrimSpace(out) == "locked", nil
 	}
 
 	isLocked, err := locked()
@@ -35,9 +36,9 @@ func ensureUnlocked(dev unlockDevice, helperPath, pin string) error {
 		return err
 	}
 
-	_, _, code, err := dev.Run(remoteCompanionPath + "unlock " + unlockQuote(pin))
+	_, _, code, err := dev.RunInput(companionPath+"unlock", []byte(pin+"\n"))
 	if err != nil || code != 0 {
-		return fmt.Errorf("%w: RemoteCompanion unlock failed; check the tweak and configured PIN", ErrDeviceLocked)
+		return fmt.Errorf("%w: companion unlock failed; check the tweak and configured PIN", ErrDeviceLocked)
 	}
 
 	for attempt := 0; attempt < 20; attempt++ {
@@ -49,62 +50,82 @@ func ensureUnlocked(dev unlockDevice, helperPath, pin string) error {
 		time.Sleep(250 * time.Millisecond)
 	}
 
-	return fmt.Errorf("%w: device remained locked after RemoteCompanion unlock", ErrDeviceLocked)
+	return fmt.Errorf("%w: device remained locked after companion unlock", ErrDeviceLocked)
 }
 
-// disableAutoLock temporarily disables SpringBoard's idle timer without
-// changing the user's saved Auto-Lock timeout. The returned function restores
-// the exact runtime state that was active before this call.
+func validLeaseToken(token string) bool {
+	if len(token) != 36 {
+		return false
+	}
+	for index, char := range token {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if char != '-' {
+				return false
+			}
+			continue
+		}
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// disableAutoLock acquires a renewable, expiring lease from the SpringBoard
+// companion. If this process disappears, the tweak restores the prior state
+// when the final lease expires.
 func disableAutoLock(dev unlockDevice) (func() error, error) {
-	const (
-		stateEnabled  = "IPADECRYPT_IDLE_TIMER_DISABLED"
-		stateDisabled = "IPADECRYPT_IDLE_TIMER_ENABLED"
-		stateSet      = "IPADECRYPT_IDLE_TIMER_SET"
-		app           = `objc_call("UIApplication","sharedApplication")`
-	)
-
-	query := `local a=` + app + `;if not a then error("IPADECRYPT_NO_APPLICATION") end;` +
-		`if objc_call(a,"isIdleTimerDisabled") then error("` + stateEnabled + `") ` +
-		`else error("` + stateDisabled + `") end`
-	out, _, code, err := dev.Run(remoteCompanionPath + "lua_eval " + unlockQuote(query))
-	if err != nil || code != 0 {
-		return nil, fmt.Errorf("%w: cannot determine screen auto-lock state", ErrDeviceLocked)
+	ttlSeconds := int(idleLeaseTTL / time.Second)
+	out, _, code, err := dev.Run(fmt.Sprintf("%sidle-acquire %d", companionPath, ttlSeconds))
+	token := strings.TrimSpace(out)
+	if err != nil || code != 0 || !validLeaseToken(token) {
+		return nil, fmt.Errorf("%w: cannot acquire screen idle-timer lease", ErrDeviceLocked)
 	}
 
-	wasDisabled := strings.Contains(out, stateEnabled)
-	if !wasDisabled && !strings.Contains(out, stateDisabled) {
-		return nil, fmt.Errorf("%w: cannot determine screen auto-lock state", ErrDeviceLocked)
-	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var renewMu sync.Mutex
+	var renewErr error
 
-	if wasDisabled {
-		return func() error { return nil }, nil
-	}
-
-	setIdleTimer := func(disabled bool) error {
-		value := "false"
-		if disabled {
-			value = "true"
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(idleLeaseRenewEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_, _, exitCode, runErr := dev.Run(fmt.Sprintf(
+					"%sidle-renew %s %d", companionPath, token, ttlSeconds))
+				renewMu.Lock()
+				if runErr != nil || exitCode != 0 {
+					renewErr = fmt.Errorf("renew screen idle-timer lease")
+				} else {
+					renewErr = nil
+				}
+				renewMu.Unlock()
+			case <-stop:
+				return
+			}
 		}
+	}()
 
-		code := `local a=` + app + `;if not a then error("IPADECRYPT_NO_APPLICATION") end;` +
-			`objc_call(a,"setIdleTimerDisabled:",` + value + `);error("` + stateSet + `")`
-		out, _, exitCode, runErr := dev.Run(remoteCompanionPath + "lua_eval " + unlockQuote(code))
-		if runErr != nil || exitCode != 0 || !strings.Contains(out, stateSet) {
-			return fmt.Errorf("%w: cannot set screen auto-lock state", ErrDeviceLocked)
-		}
-
-		return nil
-	}
-
-	if err := setIdleTimer(true); err != nil {
-		return nil, errors.Join(err, setIdleTimer(false))
-	}
-
+	var once sync.Once
+	var restoreErr error
 	return func() error {
-		if err := setIdleTimer(false); err != nil {
-			return fmt.Errorf("restore screen auto-lock: %w", err)
-		}
+		once.Do(func() {
+			close(stop)
+			<-done
 
-		return nil
+			renewMu.Lock()
+			restoreErr = renewErr
+			renewMu.Unlock()
+
+			_, _, exitCode, runErr := dev.Run(companionPath + "idle-release " + token)
+			if runErr != nil || exitCode != 0 {
+				restoreErr = errors.Join(restoreErr,
+					fmt.Errorf("release screen idle-timer lease"))
+			}
+		})
+		return restoreErr
 	}, nil
 }

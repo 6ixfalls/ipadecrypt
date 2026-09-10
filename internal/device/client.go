@@ -284,6 +284,16 @@ func shellQuote(s string) string {
 }
 
 func (c *Client) Run(cmd string) (string, string, int, error) {
+	return c.runWithInput(cmd, nil)
+}
+
+// RunInput executes cmd with the supplied bytes connected to stdin. Use it for
+// secrets that must not be interpolated into a remote process command line.
+func (c *Client) RunInput(cmd string, input []byte) (string, string, int, error) {
+	return c.runWithInput(cmd, input)
+}
+
+func (c *Client) runWithInput(cmd string, input []byte) (string, string, int, error) {
 	sess, err := c.ssh.NewSession()
 	if err != nil {
 		return "", "", -1, fmt.Errorf("new session: %w", err)
@@ -295,6 +305,9 @@ func (c *Client) Run(cmd string) (string, string, int, error) {
 
 	sess.Stdout = &so
 	sess.Stderr = &se
+	if input != nil {
+		sess.Stdin = bytes.NewReader(input)
+	}
 
 	err = sess.Run(cmd)
 

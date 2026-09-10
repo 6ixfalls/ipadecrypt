@@ -913,7 +913,7 @@ func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath
 	}()
 	startHelper := func() error {
 		if req.Device.UnlockPIN != "" {
-			if err := ensureUnlocked(dev, helperPath, req.Device.UnlockPIN); err != nil {
+			if err := ensureUnlocked(dev, req.Device.UnlockPIN); err != nil {
 				return err
 			}
 

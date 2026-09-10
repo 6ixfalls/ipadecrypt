@@ -3,11 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #define IPC_SOCKET_PATH "/var/mobile/Library/IPADDecrypt/companion.sock"
 #define MAX_MESSAGE 512
+#define IO_TIMEOUT_SECONDS 10
 
 static int write_all(int fd, const char *buf, size_t len) {
     while (len > 0) {
@@ -63,6 +65,22 @@ int main(int argc, char **argv) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         perror("socket");
+        return 1;
+    }
+
+    int no_sigpipe = 1;
+    struct timeval timeout = {
+        .tv_sec = IO_TIMEOUT_SECONDS,
+        .tv_usec = 0,
+    };
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
+                   &no_sigpipe, sizeof(no_sigpipe)) != 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
+                   &timeout, sizeof(timeout)) != 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                   &timeout, sizeof(timeout)) != 0) {
+        fprintf(stderr, "configure socket: %s\n", strerror(errno));
+        close(fd);
         return 1;
     }
 

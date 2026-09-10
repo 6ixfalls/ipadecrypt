@@ -3,10 +3,12 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach_time.h>
 #include <objc/runtime.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -15,6 +17,8 @@
 #define MAX_MESSAGE 512
 #define MIN_LEASE_TTL 15
 #define MAX_LEASE_TTL 300
+#define CLIENT_IO_TIMEOUT_SECONDS 10
+#define MAX_CONCURRENT_CLIENTS 8
 
 static NSString *const IdleReason = @"me.sixfalls.ipadecrypt";
 
@@ -29,11 +33,23 @@ static NSString *const IdleReason = @"me.sixfalls.ipadecrypt";
 - (BOOL)attemptUnlockWithPasscode:(NSString *)passcode;
 @end
 
-static NSMutableDictionary<NSString *, NSDate *> *leases;
+static NSMutableDictionary<NSString *, NSNumber *> *leases;
 static dispatch_source_t leaseTimer;
+static dispatch_semaphore_t clientSlots;
+static dispatch_semaphore_t unlockSlot;
 static BOOL ownsIdleOverride;
 static BOOL priorIdleDisabled;
 static BOOL usesReasonedIdleOverride;
+
+static NSTimeInterval continuousTime(void) {
+    static mach_timebase_info_data_t timebase;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        (void)mach_timebase_info(&timebase);
+    });
+    return ((NSTimeInterval)mach_continuous_time() * timebase.numer /
+            timebase.denom) / NSEC_PER_SEC;
+}
 
 static void runOnMainSync(dispatch_block_t block) {
     if ([NSThread isMainThread]) block();
@@ -77,10 +93,10 @@ static void restoreIdleTimerIfUnleased(void) {
 
 static void expireLeases(void) {
     NSCAssert([NSThread isMainThread], @"lease expiry must run on main");
-    NSDate *now = [NSDate date];
+    NSTimeInterval now = continuousTime();
     NSArray<NSString *> *tokens = [leases allKeys];
     for (NSString *token in tokens) {
-        if ([leases[token] compare:now] != NSOrderedDescending) {
+        if (leases[token].doubleValue <= now) {
             [leases removeObjectForKey:token];
         }
     }
@@ -125,7 +141,7 @@ static NSString *acquireIdleLease(NSTimeInterval ttl) {
         }
 
         token = [[NSUUID UUID].UUIDString lowercaseString];
-        leases[token] = [NSDate dateWithTimeIntervalSinceNow:ttl];
+        leases[token] = @(continuousTime() + ttl);
         ensureLeaseTimer();
     });
     return token;
@@ -136,7 +152,7 @@ static BOOL renewIdleLease(NSString *token, NSTimeInterval ttl) {
     runOnMainSync(^{
         expireLeases();
         if (leases[token]) {
-            leases[token] = [NSDate dateWithTimeIntervalSinceNow:ttl];
+            leases[token] = @(continuousTime() + ttl);
             renewed = YES;
         }
     });
@@ -165,7 +181,7 @@ static BOOL validPIN(NSString *pin) {
     return YES;
 }
 
-static NSString *unlockDevice(NSString *pin) {
+static NSString *unlockDeviceExclusive(NSString *pin) {
     NSInteger initial = lockState();
     if (initial < 0) return @"ERR\tunsupported\n";
     if (initial == 0) return @"OK\talready-unlocked\n";
@@ -198,6 +214,20 @@ static NSString *unlockDevice(NSString *pin) {
         usleep(100 * 1000);
     }
     return @"ERR\trejected-or-timeout\n";
+}
+
+static NSString *unlockDevice(NSString *pin) {
+    if (dispatch_semaphore_wait(unlockSlot, DISPATCH_TIME_NOW) != 0) {
+        return @"ERR\tunlock-in-progress\n";
+    }
+
+    NSString *response;
+    @try {
+        response = unlockDeviceExclusive(pin);
+    } @finally {
+        dispatch_semaphore_signal(unlockSlot);
+    }
+    return response;
 }
 
 static NSTimeInterval leaseTTL(NSString *value) {
@@ -303,10 +333,30 @@ static void startServer(void) {
             do {
                 client = accept(server, NULL, NULL);
             } while (client < 0 && errno == EINTR);
-            if (client < 0) continue;
+            if (client < 0) {
+                if (errno == EBADF || errno == EINVAL) break;
+                usleep(100 * 1000);
+                continue;
+            }
             fcntl(client, F_SETFD, FD_CLOEXEC);
+            int noSigPipe = 1;
+            struct timeval timeout = {
+                .tv_sec = CLIENT_IO_TIMEOUT_SECONDS,
+                .tv_usec = 0,
+            };
+            if (setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE,
+                           &noSigPipe, sizeof(noSigPipe)) != 0 ||
+                setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                           &timeout, sizeof(timeout)) != 0 ||
+                setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
+                           &timeout, sizeof(timeout)) != 0) {
+                close(client);
+                continue;
+            }
+            dispatch_semaphore_wait(clientSlots, DISPATCH_TIME_FOREVER);
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 serveClient(client);
+                dispatch_semaphore_signal(clientSlots);
             });
         }
     });
@@ -315,6 +365,8 @@ static void startServer(void) {
 %ctor {
     @autoreleasepool {
         leases = [NSMutableDictionary dictionary];
+        clientSlots = dispatch_semaphore_create(MAX_CONCURRENT_CLIENTS);
+        unlockSlot = dispatch_semaphore_create(1);
         startServer();
     }
 }

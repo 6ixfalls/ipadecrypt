@@ -22,6 +22,11 @@
 - Jailbroken iPhone reachable over the network
 
 ### On the jailbroken iPhone
+Keep the device unlocked on the Home Screen during decryption. A successful
+SpringBoard launch is needed to decrypt embedded frameworks; the ptrace fallback
+can only decrypt a bundle's main executable. The helper rejects incomplete
+bundles instead of reporting a partially encrypted IPA as complete.
+
 All installable through Sileo:
 
 | Package | Purpose |
@@ -173,3 +178,16 @@ The Go API supports opt-in durable cleanup through `Request.OperationID`,
 isolates remote staging, verifies cleanup, and retains clean markers for restart
 recovery. See [the cleanup contract and integration guide](docs/cleanup.md),
 including the cases that still require operator review.
+
+### Automatic device unlocking
+
+With RemoteCompanion installed, set `device.unlockPIN` in the CLI JSON
+configuration, or `DeviceConfig.UnlockPIN` when using the Go API. Keep the PIN
+as a string to preserve leading zeros. The SSH password is separate.
+
+Immediately before decryption, ipadecrypt checks the screen lock state and runs
+`rc unlock <pin>` only if locked. It attempts the supplied PIN once and verifies
+the device unlocked before proceeding. Missing RemoteCompanion, an unknown lock
+state, or an unsuccessful unlock returns `ErrDeviceLocked`. Without a PIN,
+unlock the device manually as before. The PIN is not written to operation journals
+or included in events or errors. RemoteCompanion requires it as a process argument.

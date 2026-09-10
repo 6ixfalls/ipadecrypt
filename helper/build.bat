@@ -48,7 +48,7 @@ docker run --rm ^
     -v "%CD%:/workspace" ^
     -w /workspace ^
     "%IMAGE%" ^
-    /bin/sh -c "set -e; clang -target arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET} -isysroot $IPHONEOS_SDK -isystem $IPHONEOS_SDK/usr/include -L $IPHONEOS_SDK/usr/lib -fuse-ld=lld -Wl,-arch,arm64 -Wl,-platform_version,ios,$IPHONEOS_DEPLOYMENT_TARGET,$IPHONEOS_SDK_VERSION -Wno-incompatible-sysroot -O2 -fno-stack-protector -Wno-deprecated-declarations -no-canonical-prefixes -o helper/dist/ipadecrypt-helper-arm64 helper/helper.c; ldid -Shelper/entitlements.plist helper/dist/ipadecrypt-helper-arm64"
+    /bin/sh -c "set -e; clang -target arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET} -isysroot $IPHONEOS_SDK -isystem $IPHONEOS_SDK/usr/include -L $IPHONEOS_SDK/usr/lib -lz -fuse-ld=lld -Wl,-arch,arm64 -Wl,-platform_version,ios,$IPHONEOS_DEPLOYMENT_TARGET,$IPHONEOS_SDK_VERSION -Wno-incompatible-sysroot -O2 -fno-stack-protector -Wno-deprecated-declarations -no-canonical-prefixes -o helper/dist/ipadecrypt-helper-arm64 helper/helper.c helper/args.c helper/bundle_verify.c helper/decrypt.c helper/dump.c helper/dyld_patch.c helper/exc.c helper/fs.c helper/inject.c helper/log.c helper/macho.c helper/process.c helper/spawn.c helper/target.c; ldid -Shelper/entitlements.plist helper/dist/ipadecrypt-helper-arm64"
 if errorlevel 1 exit /b 1
 
 echo ok: helper/dist/ipadecrypt-helper-arm64

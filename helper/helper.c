@@ -4,6 +4,7 @@
 #include "log.h"
 #include "operation.h"
 #include "process.h"
+#include "spawn.h"
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -115,6 +116,11 @@ static int emit_machos_recursive(const char *root, const char *rel) {
 }
 
 static int run_decrypt(const decrypt_args_t *a) {
+    if (a->bundle_id && a->bundle_id[0] && spawn_device_locked() == 1) {
+        emit(LOG_ERROR, "device.locked", NULL,
+             "unlock the device and keep it on the Home Screen during decryption; SpringBoard cannot launch the app while locked");
+        return 1;
+    }
     attrs_t run; attrs_init(&run);
     attrs_str(&run, "bundle_src", a->bundle_src);
     attrs_str(&run, "bundle_id", a->bundle_id ? a->bundle_id : "");
@@ -229,6 +235,11 @@ int main(int argc, char **argv) {
     // need a structured diagnostic when their fail-closed checks reject an
     // operation. Their stdout is captured by the Go caller.
     log_init(0);
+    if (argc == 2 && strcmp(argv[1], "lock-status") == 0) {
+        int locked = spawn_device_locked();
+        printf("%d\n", locked);
+        return locked < 0 ? 1 : 0;
+    }
     if (argc == 4 && strcmp(argv[1], "cleanup") == 0) {
         int rc = operation_cleanup(argv[2], argv[3]);
         if (rc) emit(LOG_ERROR, "cleanup.failed", NULL,

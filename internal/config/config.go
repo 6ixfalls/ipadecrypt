@@ -65,6 +65,7 @@ func (a *Apple) SetAccount(acc *appstore.Account) {
 }
 
 type Device struct {
+	UnlockPIN        string     `json:"unlockPIN,omitempty"`
 	Host             string     `json:"host,omitempty"`
 	Port             int        `json:"port,omitempty"`
 	User             string     `json:"user,omitempty"`

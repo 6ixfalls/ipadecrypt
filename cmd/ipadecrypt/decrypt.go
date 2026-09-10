@@ -64,7 +64,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	result, err := lib.Decrypt(ctx, lib.Request{
 		Target: args[0],
 		Device: lib.DeviceConfig{
-			Host: cfg.Device.Host, Port: cfg.Device.Port, User: cfg.Device.User,
+			UnlockPIN: cfg.Device.UnlockPIN,
+			Host:      cfg.Device.Host, Port: cfg.Device.Port, User: cfg.Device.User,
 			KnownHostsPath:   cfg.Device.KnownHostsPath,
 			AcceptNewHostKey: cfg.Device.AcceptNewHostKey,
 			Auth: lib.DeviceAuth{Kind: cfg.Device.Auth.Kind, Password: cfg.Device.Auth.Password,

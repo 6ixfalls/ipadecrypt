@@ -19,6 +19,7 @@ import (
 
 var (
 	ErrAppinstNotFound    = errors.New("appinst not found on device")
+	ErrDeviceLocked       = errors.New("device is locked")
 	ErrVerificationFailed = errors.New("decrypted IPA verification failed")
 )
 
@@ -853,6 +854,12 @@ func uploadAndInstall(dev *device.Client, plan installPlan, uploadPath string, r
 }
 
 func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath, bundleID, bundlePath, version, sourceIPA string, result *Result) (returnErr error) {
+	if req.Device.UnlockPIN != "" {
+		if err := ensureUnlocked(dev, helperPath, req.Device.UnlockPIN); err != nil {
+			return err
+		}
+	}
+
 	outputPath, err := resolveOutputPath(req.OutputPath, bundleID, version)
 	if err != nil {
 		return err
@@ -890,7 +897,12 @@ func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath
 
 	emit(Event{Phase: PhaseDecrypting, Action: "helper.start", Message: "starting on-device helper"})
 
+	var helperFailure error
 	onHelperEvent := func(event device.Event) {
+		if helperFailure == nil {
+			helperFailure = helperEventError(event)
+		}
+
 		attrs := make(map[string]string, len(event.Attrs))
 		for key, value := range event.Attrs {
 			attrs[key] = value
@@ -913,6 +925,10 @@ func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath
 			}
 
 			if code != 0 {
+				if helperFailure != nil {
+					return helperFailure
+				}
+
 				return fmt.Errorf("helper exited with status %d", code)
 			}
 
@@ -923,7 +939,10 @@ func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath
 		if runErr != nil {
 			err = runErr
 		} else if code != 0 {
-			err = fmt.Errorf("helper exited with status %d", code)
+			err = helperFailure
+			if err == nil {
+				err = fmt.Errorf("helper exited with status %d", code)
+			}
 		}
 	}
 
@@ -959,6 +978,17 @@ func decryptBundle(req Request, emit func(Event), dev *device.Client, helperPath
 	}
 
 	return nil
+}
+
+func helperEventError(event device.Event) error {
+	switch event.Name {
+	case "device.locked":
+		return fmt.Errorf("%w: %s", ErrDeviceLocked, event.Attr("msg"))
+	case "bundle.incomplete":
+		return fmt.Errorf("%w: %s", ErrVerificationFailed, event.Attr("msg"))
+	default:
+		return nil
+	}
 }
 
 func resolveOutputPath(override, bundleID, version string) (string, error) {

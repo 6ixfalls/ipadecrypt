@@ -55,6 +55,7 @@ docker run --rm \
             -o helper/dist/ipadecrypt-helper-arm64 \
             helper/helper.c \
             helper/args.c \
+            helper/bundle_verify.c \
             helper/decrypt.c \
             helper/dump.c \
             helper/dyld_patch.c \

@@ -9,6 +9,10 @@
 // bundle. Returns 0 on success.
 int spawn_find_main_name(const char *bundle, char *out, size_t cap);
 
+// Returns 1 when SpringBoard reports a locked device, 0 when unlocked,
+// and -1 when the private status API is unavailable.
+int spawn_device_locked(void);
+
 // Spawn `exec_path` suspended.
 //   bundle_id non-empty: SBS launch (launchd lineage). If SBS rejects
 //     (e.g. AMFI cross-SDK reject = error 12), fall back to PT_TRACE_ME.

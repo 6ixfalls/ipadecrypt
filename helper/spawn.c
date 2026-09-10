@@ -3,6 +3,7 @@
 #include "fs.h"
 #include "log.h"
 #include "mach_compat.h"
+#include "process.h"
 #include "target.h"
 
 #include <dirent.h>
@@ -27,6 +28,8 @@ typedef const void *cf_type_t;
 static cf_string_t (*CFStringCreateWithCString_)(void *, const char *, unsigned) = NULL;
 static void (*CFRelease_)(cf_type_t) = NULL;
 static int (*SBSLaunch_)(cf_string_t, unsigned char) = NULL;
+static mach_port_t (*SBServerPort_)(void) = NULL;
+static void (*SBLockStatus_)(mach_port_t, unsigned char *, unsigned char *) = NULL;
 
 static int load_sbs(void) {
     static int tried = 0;
@@ -43,12 +46,24 @@ static int load_sbs(void) {
     CFStringCreateWithCString_ = dlsym(cf, "CFStringCreateWithCString");
     CFRelease_                 = dlsym(cf, "CFRelease");
     SBSLaunch_                 = dlsym(sbs, "SBSLaunchApplicationWithIdentifier");
+    SBServerPort_              = dlsym(sbs, "SBSSpringBoardServerPort");
+    SBLockStatus_              = dlsym(sbs, "SBGetScreenLockStatus");
     if (!CFStringCreateWithCString_ || !CFRelease_ || !SBSLaunch_) {
         attrs_t a; attrs_init(&a); attrs_int(&a, "cfstring", CFStringCreateWithCString_ != NULL); attrs_int(&a, "cfrelease", CFRelease_ != NULL); attrs_int(&a, "launch", SBSLaunch_ != NULL);
         emit(LOG_WARN, "spawn.sbs.symbols_missing", &a, "SBS is missing required symbols");
         return -1;
     }
     return 0;
+}
+
+int spawn_device_locked(void) {
+    if (load_sbs() != 0 || !SBServerPort_ || !SBLockStatus_) return -1;
+    mach_port_t port = SBServerPort_();
+    if (port == MACH_PORT_NULL) return -1;
+    unsigned char locked = 0xff, passcode = 0xff;
+    SBLockStatus_(port, &locked, &passcode);
+    if (locked > 1) return -1;
+    return locked;
 }
 
 static pid_t find_pid_by_path(const char *exec_path, int ms_budget) {
@@ -58,7 +73,8 @@ static pid_t find_pid_by_path(const char *exec_path, int ms_budget) {
         if (n <= 0) { usleep(50 * 1000); continue; }
         pid_t *buf = malloc(n * sizeof(pid_t));
         if (!buf) { emit(LOG_ERROR, "spawn.pid_lookup.oom", NULL, "could not allocate PID list"); return 0; }
-        int got = proc_listallpids(buf, n * sizeof(pid_t)) / sizeof(pid_t);
+        // proc_listallpids returns a PID count, unlike proc_listpids (bytes).
+        int got = proc_listallpids(buf, n * sizeof(pid_t));
         for (int i = 0; i < got; i++) {
             char p[4096];
             if (proc_pidpath(buf[i], p, sizeof(p)) > 0 && fs_path_equiv(p, exec_path)) {
@@ -71,7 +87,8 @@ static pid_t find_pid_by_path(const char *exec_path, int ms_budget) {
         free(buf);
         usleep(50 * 1000);
     }
-    emit(LOG_WARN, "spawn.pid_lookup.timeout", &begin, "target PID was not found before timeout");
+    if (ms_budget > 50)
+        emit(LOG_WARN, "spawn.pid_lookup.timeout", &begin, "target PID was not found before timeout");
     return 0;
 }
 
@@ -234,6 +251,10 @@ static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
     if (w < 0 || WIFEXITED(status) || WIFSIGNALED(status)) {
         attrs_t a; attrs_init(&a); attrs_str(&a, "exec", exec_path); attrs_int(&a, "wait_result", w); attrs_hex(&a, "status", (unsigned int)status); if (w < 0) attrs_errno(&a, errno);
         emit(LOG_ERROR, "spawn.ptrace.child_failed", &a, "child failed during exec of %s", exec_path);
+        if (w < 0) {
+            kill(pid, SIGKILL);
+            reap_owned_process(pid);
+        }
         return -1;
     }
     *out_pid = pid;
@@ -297,7 +318,35 @@ int spawn_suspended(const char *bundle_id, const char *exec_path,
         attrs_t a; attrs_init(&a);
         attrs_str(&a, "bundle_id", bundle_id);
         emit(LOG_WARN, "target.spawn.fallback", &a,
-             "SBS rejected %s, trying ptrace", bundle_id);
+             "SBS could not provide a process for %s; ptrace fallback can only decrypt the main executable", bundle_id);
+    } else {
+        // A widget may already be running under the system's extension host.
+        // Reuse that exact executable instead of leaving it alive while
+        // decrypting a second ptrace copy and then failing operation cleanup.
+        pid_t existing = find_pid_by_path(exec_path, 50);
+        if (existing > 0) {
+            task_t task = MACH_PORT_NULL;
+            kern_return_t kr = task_for_pid(mach_task_self(), existing, &task);
+            if (kr != KERN_SUCCESS) {
+                LOG_MACH("spawn.existing.task_failed", kr, "cannot attach to existing extension");
+                return -1;
+            }
+            cs_mark_debugged(task, existing);
+            kr = task_suspend(task);
+            if (kr != KERN_SUCCESS) {
+                mach_port_deallocate(mach_task_self(), task);
+                LOG_MACH("spawn.existing.suspend_failed", kr, "cannot suspend existing extension");
+                return -1;
+            }
+            *out_pid = existing;
+            *out_task = task;
+            attrs_t a; attrs_init(&a);
+            attrs_str(&a, "method", "existing");
+            attrs_str(&a, "exec", exec_path);
+            attrs_int(&a, "pid", existing);
+            emit(LOG_INFO, "target.spawned", &a, "using existing extension process (pid=%d)", existing);
+            return 0;
+        }
     }
 
     pid_t pid = 0;
@@ -313,6 +362,7 @@ int spawn_suspended(const char *bundle_id, const char *exec_path,
     if (kr != KERN_SUCCESS) {
         er("task_for_pid(%d) after PT_TRACE_ME: %d", pid, kr);
         kill(pid, SIGKILL);
+        reap_owned_process(pid);
         return -1;
     }
     *out_ptrace = 1;

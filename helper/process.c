@@ -94,6 +94,11 @@ static int process_scan(const char *bundle, pid_t *blocked_pid,
         errno = 0;
         if (PROCESS_PIDPATH(pids[i], process_path, sizeof(process_path)) <= 0) {
             int path_errno = errno;
+            // Darwin's path lookup excludes zombies and returns ESRCH when
+            // the executable is gone. kill(pid, 0) may still succeed for
+            // these process-table entries; it is not proof of a live target.
+            // Other lookup errors remain unconfirmed unless the PID is gone.
+            if (path_errno == ESRCH) continue;
             if (PROCESS_KILL(pids[i], 0) == 0 || errno != ESRCH) {
                 *blocked_pid = pids[i];
                 *blocked_errno = path_errno;

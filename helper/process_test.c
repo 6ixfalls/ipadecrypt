@@ -12,6 +12,8 @@ enum test_mode {
     DEAD_SNAPSHOT,
     MATCHING_BUNDLE,
     UNRELATED_PROCESS,
+    EXITED_PATH,
+    DENIED_SIGNAL,
 };
 
 static enum test_mode mode;
@@ -41,7 +43,7 @@ static int test_pidpath(int pid, void *buffer, uint32_t size) {
         path = "/usr/libexec/unrelated";
 
     if (!path) {
-        errno = EACCES;
+        errno = mode == EXITED_PATH ? ESRCH : EACCES;
         return 0;
     }
     assert(strlen(path) + 1 <= size);
@@ -52,6 +54,10 @@ static int test_pidpath(int pid, void *buffer, uint32_t size) {
 static int test_kill(pid_t pid, int signal) {
     assert(pid == 42);
     assert(signal == 0);
+    if (mode == DENIED_SIGNAL) {
+        errno = EPERM;
+        return -1;
+    }
     if (mode == DEAD_SNAPSHOT) {
         errno = ESRCH;
         return -1;
@@ -103,6 +109,13 @@ int main(void) {
     assert(check(DEAD_SNAPSHOT, 0) == 1);
     assert(check(MATCHING_BUNDLE, 0) == 0);
     assert(check(UNRELATED_PROCESS, 0) == 1);
+    // Reproduce the device log: path lookup reports ESRCH while a signal
+    // probe would still succeed for the lingering process-table entry.
+    assert(check(EXITED_PATH, 1000) == 1);
+    assert(scan_count == 1);
+    assert(check(DENIED_SIGNAL, 50) == 0);
+    assert(scan_count == 2);
+    mode = UNRELATED_PROCESS;
 
     wait_count = 0;
     wait_failure = 0;

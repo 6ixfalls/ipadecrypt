@@ -7,6 +7,7 @@
 #include "log.h"
 #include "macho.h"
 #include "process.h"
+#include "bundle_verify.h"
 #include "spawn.h"
 #include "target.h"
 
@@ -138,6 +139,8 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
                  "bundle target termination was not confirmed");
             return 1;
         }
+        if (!main_dumped || !have_bundle_rt ||
+            bundle_verify_decrypted(bundle_dst, &bundle_rt) != 0) return 1;
         emit(LOG_INFO, "bundle.done", &a,
              "bundle done: main only (ptrace, no framework enumeration)");
         return 0;
@@ -274,6 +277,9 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
              "bundle target termination was not confirmed");
         return 1;
     }
+
+    if (!main_dumped || !have_bundle_rt ||
+        bundle_verify_decrypted(bundle_dst, &bundle_rt) != 0) return 1;
 
     attrs_t a; attrs_init(&a);
     attrs_str(&a, "src", bundle_src);

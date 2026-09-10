@@ -87,3 +87,26 @@ func TestNativeProcessCheck(t *testing.T) {
 		t.Fatalf("helper process check: %v\n%s", e, out)
 	}
 }
+
+func TestNativeBundleVerification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper bundle check")
+	}
+
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("C compiler unavailable")
+	}
+
+	root := t.TempDir()
+	binary := filepath.Join(root, "bundle-verify-test")
+	args := []string{"-std=c11", "-D_DEFAULT_SOURCE", "../../helper/bundle_verify_test.c", "../../helper/bundle_verify.c", "../../helper/log.c", "-o", binary}
+
+	if out, e := exec.Command(cc, args...).CombinedOutput(); e != nil {
+		t.Fatalf("compile bundle verification: %v\n%s", e, out)
+	}
+
+	if out, e := exec.Command(binary, root).CombinedOutput(); e != nil {
+		t.Fatalf("bundle verification: %v\n%s", e, out)
+	}
+}

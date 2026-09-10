@@ -71,6 +71,14 @@ System-managed caches, shared app groups, and keychain retention are governed by
 iOS; cleanup does not scan or wipe those shared resources.
 
 The helper holds an OS lock for each operation and syncs completion receipts.
+Keep the device unlocked during decryption. A confirmed locked-device check
+returns `ipadecrypt.ErrDeviceLocked` with an unlock instruction. A main-only
+fallback that leaves encrypted frameworks fails with `ErrVerificationFailed`
+before streaming the incomplete bundle. These are decryption failures, not
+proof of unfinished device work: cleanup can still succeed after targets stop.
+Existing extension processes are reused rather than spawning a duplicate that
+would leave the original extension alive after decryption.
+
 Cleanup acquires that lock and seals the directory against delayed launches.
 Before writing `helper.done`, the helper positively reaps every ptrace-owned
 child and allows one second for transient process-table entries to settle. A
@@ -117,7 +125,10 @@ Run `go test ./...`, `go test -race ./pkg/ipadecrypt ./internal/device`,
 `helper/operation_test.c` when a POSIX C compiler is present; it checks lock
 exclusion, missing receipts, permanent sealing, retry and symlink rejection without
 an iPhone. It also runs `helper/process_test.c` for transient and persistent
-process states plus owned-child reap failures. Journal/cleanup tests cover replay, invalid ownership, cancelled contexts,
+process states (including Darwin path lookup returning `ESRCH` for an exited
+process while a signal probe still succeeds) plus owned-child reap failures.
+Permission errors still block completion; an exited process-table entry does not.
+Journal/cleanup tests cover replay, invalid ownership, cancelled contexts,
 independent errors, lost responses, preservation, and failed persistence.
 
 Rebuild with `./helper/build.sh`, copy its output into

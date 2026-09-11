@@ -24,6 +24,7 @@ static NSString *const IdleReason = @"me.sixfalls.ipadecrypt";
 
 @interface UIApplication (IPADDecryptPrivate)
 - (void)_setIdleTimerDisabled:(BOOL)disabled forReason:(NSString *)reason;
+- (id)idleTimerDisabledReasons;
 - (void)resetIdleTimerAndUndim;
 @end
 
@@ -75,13 +76,51 @@ static void stopLeaseTimer(void) {
     }
 }
 
+static BOOL idleReasonIsActive(UIApplication *application) {
+    if (![application respondsToSelector:@selector(idleTimerDisabledReasons)]) {
+        return NO;
+    }
+
+    id reasons = [application idleTimerDisabledReasons];
+    return [reasons respondsToSelector:@selector(containsObject:)] &&
+           [reasons containsObject:IdleReason];
+}
+
+// The reason-scoped API does not necessarily update the public
+// idleTimerDisabled getter in SpringBoard. Verify it through the corresponding
+// reasons collection instead, and let the caller fall back to the public API
+// if this UIKit version does not expose both private selectors.
+static BOOL enableReasonedIdleOverride(UIApplication *application) {
+    if (![application respondsToSelector:
+          @selector(_setIdleTimerDisabled:forReason:)] ||
+        ![application respondsToSelector:@selector(idleTimerDisabledReasons)]) {
+        return NO;
+    }
+
+    @try {
+        [application _setIdleTimerDisabled:YES forReason:IdleReason];
+        return idleReasonIsActive(application);
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
+static void disableReasonedIdleOverride(UIApplication *application) {
+    if (![application respondsToSelector:
+          @selector(_setIdleTimerDisabled:forReason:)]) return;
+    @try {
+        [application _setIdleTimerDisabled:NO forReason:IdleReason];
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 static void restoreIdleTimerIfUnleased(void) {
     NSCAssert([NSThread isMainThread], @"idle state must be changed on main");
     if (leases.count != 0 || !ownsIdleOverride) return;
 
     UIApplication *application = [UIApplication sharedApplication];
     if (usesReasonedIdleOverride) {
-        [application _setIdleTimerDisabled:NO forReason:IdleReason];
+        disableReasonedIdleOverride(application);
     } else {
         application.idleTimerDisabled = priorIdleDisabled;
     }
@@ -123,17 +162,20 @@ static NSString *acquireIdleLease(NSTimeInterval ttl) {
 
         if (leases.count == 0) {
             priorIdleDisabled = application.idleTimerDisabled;
-            usesReasonedIdleOverride =
-                [application respondsToSelector:@selector(_setIdleTimerDisabled:forReason:)];
-            if (usesReasonedIdleOverride) {
-                [application _setIdleTimerDisabled:YES forReason:IdleReason];
-            } else if (!priorIdleDisabled) {
+            usesReasonedIdleOverride = enableReasonedIdleOverride(application);
+            if (!usesReasonedIdleOverride) {
+                // Clean up a reason that may have been installed just before
+                // verification failed, then use the observable public state.
+                disableReasonedIdleOverride(application);
                 application.idleTimerDisabled = YES;
             }
             ownsIdleOverride = YES;
         }
 
-        if (!application.idleTimerDisabled) {
+        BOOL disabled = usesReasonedIdleOverride
+            ? idleReasonIsActive(application)
+            : application.idleTimerDisabled;
+        if (!disabled) {
             leases = leases ?: [NSMutableDictionary dictionary];
             [leases removeAllObjects];
             restoreIdleTimerIfUnleased();

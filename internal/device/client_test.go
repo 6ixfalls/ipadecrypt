@@ -1,8 +1,10 @@
 package device
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +14,46 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+func TestLimitedBufferCapsRetainedBytes(t *testing.T) {
+	t.Parallel()
+
+	var b limitedBuffer
+	b.max = 8
+
+	if n, err := b.Write([]byte("123456")); err != nil || n != 6 {
+		t.Fatalf("first write = (%d, %v)", n, err)
+	}
+	if n, err := b.Write([]byte("789abcdef")); err != nil || n != 9 {
+		t.Fatalf("second write = (%d, %v)", n, err)
+	}
+	if got := b.String(); got != "12345678" {
+		t.Fatalf("retained %q, want bounded prefix", got)
+	}
+
+	var streamed bytes.Buffer
+	capture := limitedBuffer{max: 4}
+	w := io.MultiWriter(&streamed, &capture)
+	_, _ = w.Write([]byte("complete output"))
+	if streamed.String() != "complete output" || capture.String() != "comp" {
+		t.Fatalf("streamed=%q captured=%q", streamed.String(), capture.String())
+	}
+}
+
+func TestCapturedStderrUsesFullBufferWhenNotStreaming(t *testing.T) {
+	t.Parallel()
+
+	full := bytes.NewBufferString("complete stderr")
+	prefix := limitedBuffer{max: 4}
+	_, _ = prefix.Write([]byte("comp"))
+
+	if got := capturedStderr(nil, full, &prefix); got != "complete stderr" {
+		t.Fatalf("captured stderr = %q, want complete buffer", got)
+	}
+	if got := capturedStderr(io.Discard, full, &prefix); got != "comp" {
+		t.Fatalf("streamed stderr capture = %q, want bounded prefix", got)
+	}
+}
 
 func TestKnownHostsTOFURejectsChangedKey(t *testing.T) {
 	t.Parallel()

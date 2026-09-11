@@ -329,6 +329,30 @@ func (c *Client) RunSudo(cmd string) (string, string, int, error) {
 	return c.RunSudoStream(cmd, nil, nil)
 }
 
+const maxSudoStderrBytes = 64 << 10
+
+// limitedBuffer retains the beginning of a stream while continuing to accept
+// every write. Sudo reports authentication failures before command output, so
+// keeping the prefix is sufficient for classification and prevents a noisy
+// helper from retaining an IPA-sized stderr stream in memory.
+type limitedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if remaining := b.max - b.buf.Len(); remaining > 0 {
+		if remaining < len(p) {
+			p = p[:remaining]
+		}
+		_, _ = b.buf.Write(p)
+	}
+	return n, nil
+}
+
+func (b *limitedBuffer) String() string { return b.buf.String() }
+
 func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, string, int, error) {
 	full := "sudo -S -p '' " + cmd
 
@@ -350,8 +374,11 @@ func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, 
 
 	// When the caller streams stdout (e.g. binary helper output), don't
 	// also accumulate it in soBuf - a 300 MB decrypted IPA would sit in
-	// RAM. Stderr stays buffered for the sudo-password rejection check.
+	// RAM. Likewise, when stderr is streamed, keep only a bounded prefix for
+	// the sudo-password rejection check. Non-streaming callers retain the
+	// complete stderr as part of RunSudo's return value.
 	var soBuf, seBuf bytes.Buffer
+	sePrefix := limitedBuffer{max: maxSudoStderrBytes}
 
 	if stdoutW != nil {
 		sess.Stdout = stdoutW
@@ -360,7 +387,7 @@ func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, 
 	}
 
 	if stderrW != nil {
-		sess.Stderr = io.MultiWriter(stderrW, &seBuf)
+		sess.Stderr = io.MultiWriter(stderrW, &sePrefix)
 	} else {
 		sess.Stderr = &seBuf
 	}
@@ -374,16 +401,24 @@ func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, 
 		if errors.As(err, &ee) {
 			exit = ee.ExitStatus()
 		} else {
-			return soBuf.String(), seBuf.String(), -1, err
+			return soBuf.String(), capturedStderr(stderrW, &seBuf, &sePrefix), -1, err
 		}
 	}
 
-	if s := seBuf.String(); strings.Contains(s, "incorrect password") ||
+	s := capturedStderr(stderrW, &seBuf, &sePrefix)
+	if strings.Contains(s, "incorrect password") ||
 		strings.Contains(s, "try again") {
 		return soBuf.String(), s, exit, ErrSudoPasswordRejected
 	}
 
-	return soBuf.String(), seBuf.String(), exit, nil
+	return soBuf.String(), s, exit, nil
+}
+
+func capturedStderr(stderrW io.Writer, full *bytes.Buffer, prefix *limitedBuffer) string {
+	if stderrW != nil {
+		return prefix.String()
+	}
+	return full.String()
 }
 
 func (c *Client) Mkdir(path string) error {
